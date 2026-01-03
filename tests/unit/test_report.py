@@ -123,7 +123,10 @@ class TestAnomalyReport:
         loaded = AnomalyReport.from_dict(data)
 
         assert loaded.dataset == sample_report.dataset
-        assert loaded.comparison_result.is_identical == sample_report.comparison_result.is_identical
+        assert (
+            loaded.comparison_result.is_identical
+            == sample_report.comparison_result.is_identical
+        )
         assert len(loaded.comparison_result.modified_cells) == len(
             sample_report.comparison_result.modified_cells
         )

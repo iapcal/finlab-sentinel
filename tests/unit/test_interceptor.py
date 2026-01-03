@@ -74,9 +74,7 @@ class TestDataInterceptor:
 
         assert isinstance(result, pd.DataFrame)
 
-    def test_appended_data_allowed(
-        self, config_for_interceptor: SentinelConfig
-    ):
+    def test_appended_data_allowed(self, config_for_interceptor: SentinelConfig):
         """Verify appended rows are allowed in append_only mode."""
         call_count = 0
 
@@ -99,9 +97,7 @@ class TestDataInterceptor:
 
         assert len(result) == 4
 
-    def test_deleted_data_raises_error(
-        self, config_for_interceptor: SentinelConfig
-    ):
+    def test_deleted_data_raises_error(self, config_for_interceptor: SentinelConfig):
         """Verify deleted rows raise error in append_only mode."""
         call_count = 0
 
@@ -184,7 +180,9 @@ class TestDataInterceptor:
         # Should return new (2 rows)
         assert len(result) == 2
 
-    def test_converts_non_dataframe_result(self, config_for_interceptor: SentinelConfig):
+    def test_converts_non_dataframe_result(
+        self, config_for_interceptor: SentinelConfig
+    ):
         """Verify non-DataFrame results are converted."""
         # Return something that looks like a DataFrame but isn't exactly pd.DataFrame
         mock_fn = MagicMock(return_value={"a": [1, 2, 3], "b": [4, 5, 6]})
@@ -195,7 +193,9 @@ class TestDataInterceptor:
 
         assert isinstance(result, pd.DataFrame)
 
-    def test_original_get_failure_propagates(self, config_for_interceptor: SentinelConfig):
+    def test_original_get_failure_propagates(
+        self, config_for_interceptor: SentinelConfig
+    ):
         """Verify original get failures are propagated."""
         mock_fn = MagicMock(side_effect=RuntimeError("API Error"))
 
@@ -300,7 +300,9 @@ class TestAcceptCurrentData:
 
         try:
             # Accept current data
-            result = accept_current_data("test:dataset", config_for_interceptor, "test reason")
+            result = accept_current_data(
+                "test:dataset", config_for_interceptor, "test reason"
+            )
 
             assert result is True
         finally:
@@ -323,9 +325,7 @@ class TestAcceptCurrentData:
         sys.modules["finlab"] = mock_finlab
 
         try:
-            result = accept_current_data(
-                "unknown:dataset", config_for_interceptor
-            )
+            result = accept_current_data("unknown:dataset", config_for_interceptor)
             assert result is False
         finally:
             if "finlab" in sys.modules:

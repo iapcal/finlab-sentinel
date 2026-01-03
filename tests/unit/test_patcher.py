@@ -87,16 +87,12 @@ class TestEnable:
         from finlab_sentinel.core.patcher import enable, is_enabled
 
         # Create a config file in tmp_path
+        # Use as_posix() to avoid Windows backslash escaping issues in TOML
         config_file = tmp_path / "sentinel.toml"
-        config_file.write_text(f"""
-[storage]
-path = "{tmp_path}"
-""")
+        config_file.write_text(f'[storage]\npath = "{tmp_path.as_posix()}"\n')
 
         # Patch the config loading to use our temp config
-        with patch(
-            "finlab_sentinel.config.loader.CONFIG_SEARCH_PATHS", [config_file]
-        ):
+        with patch("finlab_sentinel.config.loader.CONFIG_SEARCH_PATHS", [config_file]):
             enable(None)
 
         assert is_enabled()
@@ -193,7 +189,9 @@ class TestConfigureLogging:
         logger = logging.getLogger("finlab_sentinel")
 
         # Check for file handler
-        file_handlers = [h for h in logger.handlers if isinstance(h, logging.FileHandler)]
+        file_handlers = [
+            h for h in logger.handlers if isinstance(h, logging.FileHandler)
+        ]
         assert len(file_handlers) >= 1
 
         # Cleanup handlers

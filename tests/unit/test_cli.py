@@ -34,7 +34,9 @@ class TestListCommand:
 
     def test_list_empty_storage(self, mock_config: SentinelConfig):
         """Verify list with no backups."""
-        with patch("finlab_sentinel.config.loader.load_config", return_value=mock_config):
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
             result = runner.invoke(app, ["list"])
 
         assert result.exit_code == 0
@@ -51,7 +53,9 @@ class TestListCommand:
         )
         storage.save("test__ds", "test:ds", sample_df, "hash123")
 
-        with patch("finlab_sentinel.config.loader.load_config", return_value=mock_config):
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
             result = runner.invoke(app, ["list"])
 
         assert result.exit_code == 0
@@ -67,7 +71,9 @@ class TestListCommand:
         )
         storage.save("test__ds", "test:ds", sample_df, "hash123")
 
-        with patch("finlab_sentinel.config.loader.load_config", return_value=mock_config):
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
             result = runner.invoke(app, ["list", "--format", "json"])
 
         assert result.exit_code == 0
@@ -83,7 +89,9 @@ class TestListCommand:
         )
         storage.save("test__ds", "test:ds", sample_df, "hash123")
 
-        with patch("finlab_sentinel.config.loader.load_config", return_value=mock_config):
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
             result = runner.invoke(app, ["list", "--format", "csv"])
 
         assert result.exit_code == 0
@@ -95,7 +103,9 @@ class TestCleanupCommand:
 
     def test_cleanup_no_expired(self, mock_config: SentinelConfig):
         """Verify cleanup with no expired backups."""
-        with patch("finlab_sentinel.config.loader.load_config", return_value=mock_config):
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
             result = runner.invoke(app, ["cleanup"])
 
         assert result.exit_code == 0
@@ -111,7 +121,9 @@ class TestCleanupCommand:
         )
         storage.save("test__ds", "test:ds", sample_df, "hash123")
 
-        with patch("finlab_sentinel.config.loader.load_config", return_value=mock_config):
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
             # Use 0 days to make backup "expired"
             result = runner.invoke(app, ["cleanup", "--days", "0", "--dry-run"])
 
@@ -127,7 +139,9 @@ class TestExportCommand:
 
     def test_export_not_found(self, mock_config: SentinelConfig):
         """Verify export error for missing dataset."""
-        with patch("finlab_sentinel.config.loader.load_config", return_value=mock_config):
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
             result = runner.invoke(app, ["export", "missing:dataset"])
 
         assert result.exit_code == 1
@@ -146,7 +160,9 @@ class TestExportCommand:
         output_dir = tmp_path / "output"
         output_dir.mkdir()
 
-        with patch("finlab_sentinel.config.loader.load_config", return_value=mock_config):
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
             result = runner.invoke(
                 app, ["export", "test:ds", "--output", str(output_dir)]
             )
@@ -167,7 +183,9 @@ class TestExportCommand:
         output_dir = tmp_path / "output"
         output_dir.mkdir()
 
-        with patch("finlab_sentinel.config.loader.load_config", return_value=mock_config):
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
             result = runner.invoke(
                 app,
                 ["export", "test:ds", "--output", str(output_dir), "--format", "csv"],
@@ -184,7 +202,9 @@ class TestConfigCommand:
 
     def test_config_show(self, mock_config: SentinelConfig):
         """Verify config show displays config."""
-        with patch("finlab_sentinel.config.loader.load_config", return_value=mock_config):
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
             result = runner.invoke(app, ["config", "show"])
 
         assert result.exit_code == 0
@@ -192,7 +212,9 @@ class TestConfigCommand:
 
     def test_config_validate_success(self, mock_config: SentinelConfig):
         """Verify config validate passes for valid config."""
-        with patch("finlab_sentinel.config.loader.load_config", return_value=mock_config):
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
             result = runner.invoke(app, ["config", "validate"])
 
         assert result.exit_code == 0
@@ -226,7 +248,9 @@ class TestConfigCommand:
 class TestInfoCommand:
     """Tests for info command."""
 
-    def test_info_shows_stats(self, mock_config: SentinelConfig, sample_df: pd.DataFrame):
+    def test_info_shows_stats(
+        self, mock_config: SentinelConfig, sample_df: pd.DataFrame
+    ):
         """Verify info shows storage stats."""
         storage = ParquetStorage(
             base_path=mock_config.get_storage_path(),
@@ -234,7 +258,9 @@ class TestInfoCommand:
         )
         storage.save("test__ds", "test:ds", sample_df, "hash123")
 
-        with patch("finlab_sentinel.config.loader.load_config", return_value=mock_config):
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
             result = runner.invoke(app, ["info"])
 
         assert result.exit_code == 0
@@ -247,9 +273,12 @@ class TestAcceptCommand:
 
     def test_accept_missing_dataset(self, mock_config: SentinelConfig):
         """Verify accept fails for missing dataset."""
-        with patch("finlab_sentinel.config.loader.load_config", return_value=mock_config):
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
             with patch(
-                "finlab_sentinel.core.interceptor.accept_current_data", return_value=False
+                "finlab_sentinel.core.interceptor.accept_current_data",
+                return_value=False,
             ):
                 result = runner.invoke(app, ["accept", "missing:dataset"])
 
@@ -258,9 +287,12 @@ class TestAcceptCommand:
 
     def test_accept_success(self, mock_config: SentinelConfig):
         """Verify accept succeeds."""
-        with patch("finlab_sentinel.config.loader.load_config", return_value=mock_config):
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
             with patch(
-                "finlab_sentinel.core.interceptor.accept_current_data", return_value=True
+                "finlab_sentinel.core.interceptor.accept_current_data",
+                return_value=True,
             ):
                 result = runner.invoke(
                     app, ["accept", "test:dataset", "--reason", "Test reason"]
@@ -275,15 +307,15 @@ class TestDiffCommand:
 
     def test_diff_no_backup(self, mock_config: SentinelConfig):
         """Verify diff fails when no backup exists."""
-        with patch("finlab_sentinel.config.loader.load_config", return_value=mock_config):
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
             result = runner.invoke(app, ["diff", "missing:dataset"])
 
         assert result.exit_code == 1
         assert "No backup found" in result.stdout
 
-    def test_diff_identical(
-        self, mock_config: SentinelConfig, sample_df: pd.DataFrame
-    ):
+    def test_diff_identical(self, mock_config: SentinelConfig, sample_df: pd.DataFrame):
         """Verify diff shows no differences for identical data."""
         storage = ParquetStorage(
             base_path=mock_config.get_storage_path(),
@@ -304,7 +336,9 @@ class TestDiffCommand:
         sys.modules["finlab"] = mock_finlab
 
         try:
-            with patch("finlab_sentinel.config.loader.load_config", return_value=mock_config):
+            with patch(
+                "finlab_sentinel.config.loader.load_config", return_value=mock_config
+            ):
                 result = runner.invoke(app, ["diff", "test:ds"])
 
             assert result.exit_code == 0

@@ -22,9 +22,7 @@ class TestFindConfigFile:
 
     def test_returns_none_when_no_config(self):
         """Verify returns None when no config file exists."""
-        with patch.object(
-            Path, "exists", return_value=False
-        ):
+        with patch.object(Path, "exists", return_value=False):
             result = _find_config_file()
             assert result is None
 
@@ -128,7 +126,7 @@ retention_days = 14
     def test_loads_from_env_variable(self, tmp_path):
         """Verify config is loaded from FINLAB_SENTINEL_CONFIG env var."""
         config_file = tmp_path / "env_config.toml"
-        config_file.write_text('[storage]\nretention_days = 30')
+        config_file.write_text("[storage]\nretention_days = 30")
 
         with patch.dict(os.environ, {"FINLAB_SENTINEL_CONFIG": str(config_file)}):
             config = load_config()
@@ -157,7 +155,7 @@ retention_days = 14
         """Verify auto_discover=False skips file search."""
         # Create a config in current dir that would normally be found
         config_file = tmp_path / "sentinel.toml"
-        config_file.write_text('[storage]\nretention_days = 99')
+        config_file.write_text("[storage]\nretention_days = 99")
 
         with patch(
             "finlab_sentinel.config.loader.CONFIG_SEARCH_PATHS",
