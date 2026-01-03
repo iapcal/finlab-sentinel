@@ -85,7 +85,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["ARG001"]  # Allow unused arguments in test files
+"tests/*" = ["ARG001", "E501", "B017", "SIM117"]  # Relax rules for test files
 
 [tool.mypy]
 python_version = "3.10"

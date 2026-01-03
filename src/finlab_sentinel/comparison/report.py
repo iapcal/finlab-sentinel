@@ -233,22 +233,27 @@ def _serialize_value(val: Any) -> Any:
     import numpy as np
     import pandas as pd
 
-    if pd.isna(val):
-        if val is None:
-            return {"__na__": "None"}
-        if val is pd.NA:
-            return {"__na__": "pd.NA"}
-        if isinstance(val, float):
-            return {"__na__": "np.nan"}
-        return {"__na__": "unknown"}
+    # Check for numpy array first (before pd.isna which doesn't work on arrays)
+    if isinstance(val, np.ndarray):
+        return val.tolist()
 
     if isinstance(val, (np.integer, np.floating)):
         return float(val)
 
-    if isinstance(val, np.ndarray):
-        return val.tolist()
-
     if isinstance(val, (datetime, pd.Timestamp)):
         return val.isoformat()
+
+    # Check for NA values (scalar only)
+    try:
+        if pd.isna(val):
+            if val is None:
+                return {"__na__": "None"}
+            if val is pd.NA:
+                return {"__na__": "pd.NA"}
+            if isinstance(val, float):
+                return {"__na__": "np.nan"}
+            return {"__na__": "unknown"}
+    except (ValueError, TypeError):
+        pass  # Not a scalar NA value
 
     return str(val)
