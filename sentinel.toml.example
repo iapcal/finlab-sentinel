@@ -1,0 +1,70 @@
+# finlab-sentinel configuration file
+# Copy this to sentinel.toml and customize as needed
+
+[storage]
+# Base path for backup storage (supports ~ expansion)
+path = "~/.finlab-sentinel/"
+
+# Number of days to retain backups (rolling backup)
+retention_days = 7
+
+# Parquet compression algorithm: zstd, snappy, gzip, none
+compression = "zstd"
+
+[comparison]
+# Relative tolerance for numeric comparisons
+rtol = 1e-5
+
+# Absolute tolerance for numeric comparisons
+atol = 1e-8
+
+# Check for dtype changes
+check_dtype = true
+
+# Check for NA type differences (pd.NA vs np.nan vs None)
+check_na_type = true
+
+# Change threshold (ratio of cells changed)
+# Changes exceeding this trigger anomaly handling
+change_threshold = 0.10
+
+[comparison.policies]
+# Default comparison mode: append_only, threshold, permissive
+# - append_only: Only allow new rows/columns, no modifications
+# - threshold: Allow changes below change_threshold
+# - permissive: Allow all changes
+default_mode = "append_only"
+
+# Datasets that can modify historical data (use permissive mode)
+# These datasets are exempt from append-only checks
+history_modifiable = [
+    # "fundamental_features:某些財報資料",
+]
+
+[anomaly]
+# Behavior when anomaly detected:
+# - raise: Throw exception (stops execution)
+# - warn_return_cached: Warning + use cached data
+# - warn_return_new: Warning + use new data anyway
+behavior = "raise"
+
+# Save anomaly reports to files
+save_reports = true
+
+# Directory for anomaly reports (relative to storage.path)
+reports_dir = "reports/"
+
+# Optional callback for notifications (format: "module.path:function_name")
+# Example: send LINE notification when anomaly detected
+# callback = "myproject.notifications:send_line_notification"
+
+[logging]
+# Log level: DEBUG, INFO, WARNING, ERROR
+level = "INFO"
+
+# Optional log file path (logs to stderr if not specified)
+# file = "~/.finlab-sentinel/sentinel.log"
+
+[cli]
+# Default output format for CLI commands: table, json, csv
+output_format = "table"

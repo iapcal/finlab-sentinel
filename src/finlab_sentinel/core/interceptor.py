@@ -1,0 +1,280 @@
+"""Data interception and orchestration."""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+from datetime import datetime
+from typing import Any, Callable, Optional
+
+import pandas as pd
+
+from finlab_sentinel.comparison.differ import DataFrameComparer
+from finlab_sentinel.comparison.hasher import ContentHasher
+from finlab_sentinel.comparison.policies import get_policy_for_dataset
+from finlab_sentinel.comparison.report import AnomalyReport
+from finlab_sentinel.config.schema import SentinelConfig
+from finlab_sentinel.handlers.base import AnomalyHandler
+from finlab_sentinel.handlers.callback import create_handler_from_config
+from finlab_sentinel.storage.parquet import ParquetStorage, sanitize_backup_key
+
+logger = logging.getLogger(__name__)
+
+
+class DataInterceptor:
+    """Intercepts data.get calls and performs comparison logic."""
+
+    def __init__(
+        self,
+        original_get: Callable,
+        config: SentinelConfig,
+    ) -> None:
+        """Initialize interceptor.
+
+        Args:
+            original_get: Original data.get function
+            config: Sentinel configuration
+        """
+        self.original_get = original_get
+        self.config = config
+
+        # Initialize components
+        self.storage = ParquetStorage(
+            base_path=config.get_storage_path(),
+            compression=config.storage.compression,
+        )
+
+        self.hasher = ContentHasher()
+
+        self.comparer = DataFrameComparer(
+            rtol=config.comparison.rtol,
+            atol=config.comparison.atol,
+            check_dtype=config.comparison.check_dtype,
+            check_na_type=config.comparison.check_na_type,
+        )
+
+        # Create handler
+        self.handler = create_handler_from_config(
+            behavior=config.anomaly.behavior.value,
+            callback=config.anomaly.get_callback(),
+        )
+
+    def __call__(
+        self,
+        dataset: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Intercept data.get call.
+
+        Args:
+            dataset: Dataset name
+            *args: Positional arguments for original function
+            **kwargs: Keyword arguments for original function
+
+        Returns:
+            DataFrame (either new, cached, or as determined by handler)
+        """
+        logger.debug(f"Intercepting data.get for: {dataset}")
+
+        # 1. Call original data.get
+        try:
+            new_data = self.original_get(dataset, *args, **kwargs)
+        except Exception as e:
+            logger.error(f"Original data.get failed for {dataset}: {e}")
+            raise
+
+        # Ensure it's a DataFrame
+        if not isinstance(new_data, pd.DataFrame):
+            # Convert FinlabDataFrame or similar to pandas DataFrame
+            new_data = pd.DataFrame(new_data)
+
+        # 2. Generate backup key
+        backup_key = self._generate_backup_key(dataset)
+
+        # 3. Compute hash of new data
+        new_hash = self.hasher.hash_dataframe(new_data)
+
+        # 4. Check for existing backup
+        cached = self.storage.load_latest(backup_key)
+
+        if cached is None:
+            # First time - save as baseline
+            logger.info(f"First backup for {dataset}, saving as baseline")
+            self.storage.save(backup_key, dataset, new_data, new_hash)
+            return new_data
+
+        cached_data, cached_metadata = cached
+
+        # 5. Quick comparison via hash
+        if new_hash == cached_metadata.content_hash:
+            logger.debug(f"Hash match for {dataset}, data unchanged")
+            return new_data
+
+        logger.debug(f"Hash mismatch for {dataset}, performing full comparison")
+
+        # 6. Full comparison
+        result = self.comparer.compare(cached_data, new_data)
+
+        if result.is_identical:
+            # Hash mismatch but identical content (shouldn't happen often)
+            logger.debug(f"Full comparison shows identical for {dataset}")
+            return new_data
+
+        # 7. Apply policy
+        policy = get_policy_for_dataset(
+            dataset=dataset,
+            default_mode=self.config.comparison.policies.default_mode.value,
+            history_modifiable=set(
+                self.config.comparison.policies.history_modifiable
+            ),
+            threshold=self.config.comparison.change_threshold,
+        )
+
+        if not policy.is_violation(result):
+            # Changes are within policy - update backup
+            logger.info(
+                f"Changes accepted for {dataset}: {result.summary()} "
+                f"[{policy.name} policy]"
+            )
+            self.storage.save(backup_key, dataset, new_data, new_hash)
+            return new_data
+
+        # 8. Policy violation - create report
+        report = AnomalyReport(
+            dataset=dataset,
+            backup_key=backup_key,
+            detected_at=datetime.now(),
+            comparison_result=result,
+            policy_name=policy.name,
+            violation_message=policy.get_violation_message(result),
+            old_hash=cached_metadata.content_hash,
+            new_hash=new_hash,
+        )
+
+        # 9. Save report if configured
+        if self.config.anomaly.save_reports:
+            report.save(self.config.get_reports_path())
+
+        # 10. Handle anomaly
+        logger.warning(f"Data anomaly detected: {report.summary}")
+
+        return self.handler.handle(report, cached_data, new_data)
+
+    def _generate_backup_key(self, dataset: str) -> str:
+        """Generate unique key for backup storage.
+
+        Args:
+            dataset: Dataset name
+
+        Returns:
+            Sanitized backup key
+        """
+        # Try to get universe settings from finlab
+        universe_hash = self._get_universe_hash()
+
+        return sanitize_backup_key(dataset, universe_hash)
+
+    def _get_universe_hash(self) -> Optional[str]:
+        """Get hash of current universe settings.
+
+        Returns:
+            Hash string or None if no universe is set
+        """
+        try:
+            # Import finlab to check universe settings
+            from finlab import data
+
+            # Try to get current universe settings
+            # This depends on finlab's internal API
+            if hasattr(data, "_universe") and data._universe is not None:
+                universe_str = str(data._universe)
+                return hashlib.md5(universe_str.encode()).hexdigest()[:8]
+
+            # Alternative: check for universe context
+            if hasattr(data, "universe") and hasattr(data.universe, "_current"):
+                universe = data.universe._current
+                if universe is not None:
+                    universe_str = str(universe)
+                    return hashlib.md5(universe_str.encode()).hexdigest()[:8]
+
+        except Exception as e:
+            logger.debug(f"Could not get universe hash: {e}")
+
+        return None
+
+
+def accept_current_data(
+    dataset: str,
+    config: Optional[SentinelConfig] = None,
+    reason: Optional[str] = None,
+) -> bool:
+    """Accept current data as new baseline for a dataset.
+
+    This is used to acknowledge and accept anomalous data after review.
+
+    Args:
+        dataset: Dataset name to accept
+        config: Optional configuration (uses default if not provided)
+        reason: Optional reason for accepting
+
+    Returns:
+        True if successful, False if dataset not found
+    """
+    if config is None:
+        from finlab_sentinel.config.loader import load_config
+
+        config = load_config()
+
+    storage = ParquetStorage(
+        base_path=config.get_storage_path(),
+        compression=config.storage.compression,
+    )
+
+    # Generate backup key
+    backup_key = sanitize_backup_key(dataset)
+
+    # Get latest backup
+    cached = storage.load_latest(backup_key)
+    if cached is None:
+        logger.warning(f"No backup found for {dataset}")
+        return False
+
+    # Re-fetch current data
+    try:
+        from finlab import data as finlab_data
+
+        # Get the original function if we're enabled
+        from finlab_sentinel.core.registry import get_original
+
+        original_get = get_original("data.get")
+        if original_get:
+            new_data = original_get(dataset)
+        else:
+            new_data = finlab_data.get(dataset)
+
+        if not isinstance(new_data, pd.DataFrame):
+            new_data = pd.DataFrame(new_data)
+
+    except Exception as e:
+        logger.error(f"Failed to fetch current data for {dataset}: {e}")
+        return False
+
+    # Compute hash and save as accepted
+    hasher = ContentHasher()
+    new_hash = hasher.hash_dataframe(new_data)
+
+    storage.accept_new_data(
+        backup_key=backup_key,
+        data=new_data,
+        content_hash=new_hash,
+        dataset=dataset,
+        reason=reason,
+    )
+
+    logger.info(
+        f"Accepted new data for {dataset}"
+        + (f" (reason: {reason})" if reason else "")
+    )
+
+    return True
