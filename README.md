@@ -1,8 +1,12 @@
 # finlab-sentinel
 
-[![CI](https://github.com/yourusername/finlab-sentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/yourusername/finlab-sentinel/actions/workflows/ci.yml)
-[![PyPI version](https://badge.fury.io/py/finlab-sentinel.svg)](https://badge.fury.io/py/finlab-sentinel)
-[![Python Versions](https://img.shields.io/pypi/pyversions/finlab-sentinel.svg)](https://pypi.org/project/finlab-sentinel/)
+![Python versions](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue)
+![Windows](https://img.shields.io/badge/OS-Windows-0078D6?logo=windows&logoColor=white)
+![Linux](https://img.shields.io/badge/OS-Linux-FCC624?logo=linux&logoColor=black)
+![macOS](https://img.shields.io/badge/OS-macOS-000000?logo=apple&logoColor=white)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![CI](https://github.com/iapcal/finlab-sentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/iapcal/finlab-sentinel/actions/workflows/ci.yml)
+[![coverage](https://img.shields.io/codecov/c/github/iapcal/finlab-sentinel)](https://codecov.io/gh/iapcal/finlab-sentinel)
 
 **finlab-sentinel** 是 [finlab](https://github.com/finlab-python/finlab) 套件的防禦層，用於監控 `data.get` API 的資料變化，防止未預期的資料異動影響回測或選股結果。
 
