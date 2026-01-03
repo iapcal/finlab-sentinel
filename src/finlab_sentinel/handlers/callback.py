@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
@@ -90,6 +91,7 @@ def create_handler_from_config(
     )
 
     # Create base handler
+    base_handler: AnomalyHandler
     if behavior == "raise":
         base_handler = RaiseExceptionHandler()
     elif behavior == "warn_return_cached":

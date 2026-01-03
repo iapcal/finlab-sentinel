@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from finlab_sentinel.comparison.differ import (
     CellChange,
@@ -31,8 +31,8 @@ class AnomalyReport:
     violation_message: str
 
     # Optional metadata
-    old_hash: Optional[str] = None
-    new_hash: Optional[str] = None
+    old_hash: str | None = None
+    new_hash: str | None = None
 
     @property
     def summary(self) -> str:
@@ -42,7 +42,7 @@ class AnomalyReport:
             f"[{self.policy_name} violated]"
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert report to dictionary for serialization."""
         result = self.comparison_result
 
@@ -122,7 +122,7 @@ class AnomalyReport:
         return filepath
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> AnomalyReport:
+    def from_dict(cls, data: dict[str, Any]) -> AnomalyReport:
         """Create report from dictionary.
 
         Args:
@@ -203,7 +203,7 @@ class AnomalyReport:
         return cls.from_dict(data)
 
 
-def list_reports(directory: Path) -> List[Path]:
+def list_reports(directory: Path) -> list[Path]:
     """List all anomaly report files in directory.
 
     Args:

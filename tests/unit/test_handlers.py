@@ -9,7 +9,10 @@ import pytest
 from finlab_sentinel.comparison.differ import ComparisonResult
 from finlab_sentinel.comparison.report import AnomalyReport
 from finlab_sentinel.exceptions import DataAnomalyError
-from finlab_sentinel.handlers.callback import CallbackHandler, create_handler_from_config
+from finlab_sentinel.handlers.callback import (
+    CallbackHandler,
+    create_handler_from_config,
+)
 from finlab_sentinel.handlers.exception import RaiseExceptionHandler
 from finlab_sentinel.handlers.warning import (
     WarnReturnCachedHandler,
@@ -124,6 +127,7 @@ class TestCallbackHandler:
         self, sample_report: AnomalyReport, sample_df: pd.DataFrame
     ):
         """Verify callback exceptions don't crash handler."""
+
         def bad_callback(report):
             raise RuntimeError("Callback failed")
 

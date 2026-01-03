@@ -1,7 +1,5 @@
 """Tests for comparison policies."""
 
-import pytest
-
 from finlab_sentinel.comparison.differ import ComparisonResult, DtypeChange
 from finlab_sentinel.comparison.policies import (
     AppendOnlyPolicy,

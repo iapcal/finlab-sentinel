@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, List, Set, Tuple
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -60,17 +60,17 @@ class ComparisonResult:
     """Result of DataFrame comparison."""
 
     is_identical: bool
-    added_rows: Set[Any] = field(default_factory=set)
-    deleted_rows: Set[Any] = field(default_factory=set)
-    added_columns: Set[Any] = field(default_factory=set)
-    deleted_columns: Set[Any] = field(default_factory=set)
-    modified_cells: List[CellChange] = field(default_factory=list)
-    dtype_changes: List[DtypeChange] = field(default_factory=list)
-    na_type_changes: List[CellChange] = field(default_factory=list)
+    added_rows: set[Any] = field(default_factory=set)
+    deleted_rows: set[Any] = field(default_factory=set)
+    added_columns: set[Any] = field(default_factory=set)
+    deleted_columns: set[Any] = field(default_factory=set)
+    modified_cells: list[CellChange] = field(default_factory=list)
+    dtype_changes: list[DtypeChange] = field(default_factory=list)
+    na_type_changes: list[CellChange] = field(default_factory=list)
 
     # Metrics
-    old_shape: Tuple[int, int] = (0, 0)
-    new_shape: Tuple[int, int] = (0, 0)
+    old_shape: tuple[int, int] = (0, 0)
+    new_shape: tuple[int, int] = (0, 0)
 
     @property
     def total_changes(self) -> int:
@@ -207,9 +207,7 @@ class DataFrameComparer:
                 old_dtype = str(old_df[col].dtype)
                 new_dtype = str(new_df[col].dtype)
                 if old_dtype != new_dtype:
-                    result.dtype_changes.append(
-                        DtypeChange(col, old_dtype, new_dtype)
-                    )
+                    result.dtype_changes.append(DtypeChange(col, old_dtype, new_dtype))
 
         # Compare values in common rows and columns
         common_index = old_index & new_index
@@ -255,7 +253,7 @@ class DataFrameComparer:
         self,
         old_val: Any,
         new_val: Any,
-        dtype: np.dtype,
+        dtype: Any,
     ) -> bool:
         """Compare two values with appropriate tolerance.
 

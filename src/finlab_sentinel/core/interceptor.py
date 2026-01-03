@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Callable, Optional
+from typing import Any
 
 import pandas as pd
 
@@ -14,7 +15,6 @@ from finlab_sentinel.comparison.hasher import ContentHasher
 from finlab_sentinel.comparison.policies import get_policy_for_dataset
 from finlab_sentinel.comparison.report import AnomalyReport
 from finlab_sentinel.config.schema import SentinelConfig
-from finlab_sentinel.handlers.base import AnomalyHandler
 from finlab_sentinel.handlers.callback import create_handler_from_config
 from finlab_sentinel.storage.parquet import ParquetStorage, sanitize_backup_key
 
@@ -125,9 +125,7 @@ class DataInterceptor:
         policy = get_policy_for_dataset(
             dataset=dataset,
             default_mode=self.config.comparison.policies.default_mode.value,
-            history_modifiable=set(
-                self.config.comparison.policies.history_modifiable
-            ),
+            history_modifiable=set(self.config.comparison.policies.history_modifiable),
             threshold=self.config.comparison.change_threshold,
         )
 
@@ -175,7 +173,7 @@ class DataInterceptor:
 
         return sanitize_backup_key(dataset, universe_hash)
 
-    def _get_universe_hash(self) -> Optional[str]:
+    def _get_universe_hash(self) -> str | None:
         """Get hash of current universe settings.
 
         Returns:
@@ -206,8 +204,8 @@ class DataInterceptor:
 
 def accept_current_data(
     dataset: str,
-    config: Optional[SentinelConfig] = None,
-    reason: Optional[str] = None,
+    config: SentinelConfig | None = None,
+    reason: str | None = None,
 ) -> bool:
     """Accept current data as new baseline for a dataset.
 
@@ -248,10 +246,8 @@ def accept_current_data(
         from finlab_sentinel.core.registry import get_original
 
         original_get = get_original("data.get")
-        if original_get:
-            new_data = original_get(dataset)
-        else:
-            new_data = finlab_data.get(dataset)
+        get_fn = original_get if original_get else finlab_data.get
+        new_data = get_fn(dataset)
 
         if not isinstance(new_data, pd.DataFrame):
             new_data = pd.DataFrame(new_data)
@@ -273,8 +269,7 @@ def accept_current_data(
     )
 
     logger.info(
-        f"Accepted new data for {dataset}"
-        + (f" (reason: {reason})" if reason else "")
+        f"Accepted new data for {dataset}" + (f" (reason: {reason})" if reason else "")
     )
 
     return True

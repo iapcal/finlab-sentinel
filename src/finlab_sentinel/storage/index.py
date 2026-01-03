@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Iterator, List, Optional
 
 from finlab_sentinel.storage.backend import BackupMetadata
 
@@ -66,7 +66,7 @@ class BackupIndex:
         finally:
             conn.close()
 
-    def add(self, metadata: BackupMetadata, reason: Optional[str] = None) -> None:
+    def add(self, metadata: BackupMetadata, reason: str | None = None) -> None:
         """Add backup metadata to index.
 
         Args:
@@ -95,7 +95,7 @@ class BackupIndex:
             )
         logger.debug(f"Added backup to index: {metadata.backup_key}")
 
-    def get_latest(self, backup_key: str) -> Optional[BackupMetadata]:
+    def get_latest(self, backup_key: str) -> BackupMetadata | None:
         """Get most recent backup metadata for a key.
 
         Args:
@@ -120,9 +120,7 @@ class BackupIndex:
 
             return self._row_to_metadata(row)
 
-    def get_by_date(
-        self, backup_key: str, date: datetime
-    ) -> Optional[BackupMetadata]:
+    def get_by_date(self, backup_key: str, date: datetime) -> BackupMetadata | None:
         """Get backup metadata for a specific date.
 
         Args:
@@ -151,9 +149,7 @@ class BackupIndex:
 
             return self._row_to_metadata(row)
 
-    def list_all(
-        self, backup_key: Optional[str] = None
-    ) -> List[BackupMetadata]:
+    def list_all(self, backup_key: str | None = None) -> list[BackupMetadata]:
         """List all backups, optionally filtered by key.
 
         Args:
@@ -179,7 +175,7 @@ class BackupIndex:
 
             return [self._row_to_metadata(row) for row in rows]
 
-    def delete_expired(self, before_date: datetime) -> List[BackupMetadata]:
+    def delete_expired(self, before_date: datetime) -> list[BackupMetadata]:
         """Delete backups created before a date.
 
         Args:
@@ -207,8 +203,8 @@ class BackupIndex:
             return deleted
 
     def delete_by_key(
-        self, backup_key: str, date: Optional[datetime] = None
-    ) -> List[BackupMetadata]:
+        self, backup_key: str, date: datetime | None = None
+    ) -> list[BackupMetadata]:
         """Delete backups by key and optionally date.
 
         Args:
@@ -246,7 +242,7 @@ class BackupIndex:
 
             return [self._row_to_metadata(row) for row in rows]
 
-    def get_unique_keys(self) -> List[str]:
+    def get_unique_keys(self) -> list[str]:
         """Get list of unique backup keys.
 
         Returns:

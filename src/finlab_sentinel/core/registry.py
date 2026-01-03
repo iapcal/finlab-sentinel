@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from collections.abc import Callable
 
 # Global registry for original functions
 _original_functions: dict[str, Callable] = {}
@@ -21,7 +21,7 @@ def store_original(name: str, func: Callable) -> None:
     _original_functions[name] = func
 
 
-def get_original(name: str) -> Optional[Callable]:
+def get_original(name: str) -> Callable | None:
     """Get original function from registry.
 
     Args:
@@ -33,7 +33,7 @@ def get_original(name: str) -> Optional[Callable]:
     return _original_functions.get(name)
 
 
-def remove_original(name: str) -> Optional[Callable]:
+def remove_original(name: str) -> Callable | None:
     """Remove and return original function from registry.
 
     Args:

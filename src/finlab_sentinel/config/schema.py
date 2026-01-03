@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from enum import Enum
 from pathlib import Path
-from typing import Callable, List, Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -46,7 +47,7 @@ class ComparisonPoliciesConfig(BaseModel):
     """Comparison policies configuration."""
 
     default_mode: PolicyMode = PolicyMode.APPEND_ONLY
-    history_modifiable: List[str] = Field(default_factory=list)
+    history_modifiable: list[str] = Field(default_factory=list)
 
 
 class ComparisonConfig(BaseModel):
@@ -57,9 +58,7 @@ class ComparisonConfig(BaseModel):
     check_dtype: bool = True
     check_na_type: bool = True
     change_threshold: float = Field(default=0.10, ge=0, le=1)
-    policies: ComparisonPoliciesConfig = Field(
-        default_factory=ComparisonPoliciesConfig
-    )
+    policies: ComparisonPoliciesConfig = Field(default_factory=ComparisonPoliciesConfig)
 
 
 class AnomalyConfig(BaseModel):
@@ -68,10 +67,10 @@ class AnomalyConfig(BaseModel):
     behavior: AnomalyBehavior = AnomalyBehavior.RAISE
     save_reports: bool = True
     reports_dir: str = "reports/"
-    callback: Optional[str] = None  # "module.path:function_name"
+    callback: str | None = None  # "module.path:function_name"
 
     # Runtime callback (not serializable, set programmatically)
-    _callback_fn: Optional[Callable] = None
+    _callback_fn: Callable | None = None
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -79,7 +78,7 @@ class AnomalyConfig(BaseModel):
         """Set callback function programmatically."""
         self._callback_fn = fn
 
-    def get_callback(self) -> Optional[Callable]:
+    def get_callback(self) -> Callable | None:
         """Get callback function."""
         return self._callback_fn
 
@@ -88,7 +87,7 @@ class LoggingConfig(BaseModel):
     """Logging configuration."""
 
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
-    file: Optional[Path] = None
+    file: Path | None = None
 
     @field_validator("file", mode="before")
     @classmethod

@@ -66,7 +66,10 @@ class TestSentinelConfig:
 
     def test_is_dataset_history_modifiable(self):
         """Verify blacklist check."""
-        from finlab_sentinel.config.schema import ComparisonConfig, ComparisonPoliciesConfig
+        from finlab_sentinel.config.schema import (
+            ComparisonConfig,
+            ComparisonPoliciesConfig,
+        )
 
         config = SentinelConfig(
             comparison=ComparisonConfig(

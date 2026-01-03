@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 import typer
 from rich.console import Console
@@ -18,13 +17,13 @@ app = typer.Typer(
 console = Console()
 
 # Global options
-_config_path: Optional[Path] = None
+_config_path: Path | None = None
 _verbose: bool = False
 
 
 @app.callback()
 def main(
-    config: Optional[Path] = typer.Option(
+    config: Path | None = typer.Option(
         None,
         "--config",
         "-c",
@@ -50,13 +49,13 @@ def main(
 
 @app.command("list")
 def list_backups(
-    dataset: Optional[str] = typer.Option(
+    dataset: str | None = typer.Option(
         None,
         "--dataset",
         "-d",
         help="Filter by dataset name",
     ),
-    days: Optional[int] = typer.Option(
+    days: int | None = typer.Option(
         None,
         "--days",
         help="Show only last N days",
@@ -130,7 +129,7 @@ def list_backups(
 
 @app.command("cleanup")
 def cleanup(
-    days: Optional[int] = typer.Option(
+    days: int | None = typer.Option(
         None,
         "--days",
         "-d",
@@ -166,9 +165,7 @@ def cleanup(
     to_delete = [b for b in backups if b.created_at < cutoff]
 
     if not to_delete:
-        console.print(
-            f"[green]No backups older than {retention_days} days[/green]"
-        )
+        console.print(f"[green]No backups older than {retention_days} days[/green]")
         return
 
     # Show what will be deleted
@@ -211,7 +208,7 @@ def export_backup(
         "-f",
         help="Export format: parquet, csv",
     ),
-    date: Optional[str] = typer.Option(
+    date: str | None = typer.Option(
         None,
         "--date",
         help="Export specific date (YYYY-MM-DD)",
@@ -261,7 +258,7 @@ def export_backup(
 @app.command("accept")
 def accept(
     dataset: str = typer.Argument(..., help="Dataset name to accept"),
-    reason: Optional[str] = typer.Option(
+    reason: str | None = typer.Option(
         None,
         "--reason",
         "-r",
@@ -288,12 +285,12 @@ def accept(
 @app.command("diff")
 def diff(
     dataset: str = typer.Argument(..., help="Dataset name to diff"),
-    from_date: Optional[str] = typer.Option(
+    from_date: str | None = typer.Option(
         None,
         "--from",
         help="From date (YYYY-MM-DD)",
     ),
-    to_date: Optional[str] = typer.Option(
+    to_date: str | None = typer.Option(
         None,
         "--to",
         help="To date (YYYY-MM-DD)",
@@ -338,9 +335,9 @@ def diff(
             from finlab import data
 
             new_df = data.get(dataset)
-        except ImportError:
+        except ImportError as e:
             console.print("[red]finlab not installed[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from e
 
     # Compare
     comparer = DataFrameComparer(
@@ -386,8 +383,8 @@ def diff(
 
     if result.dtype_changes:
         console.print(f"[yellow]~ {len(result.dtype_changes)} dtype changes[/yellow]")
-        for change in result.dtype_changes:
-            console.print(f"    {change}")
+        for dtype_change in result.dtype_changes:
+            console.print(f"    {dtype_change}")
 
 
 @app.command("config")
@@ -396,7 +393,7 @@ def config_cmd(
         "show",
         help="Action: show, validate, init, paths",
     ),
-    output: Optional[Path] = typer.Option(
+    output: Path | None = typer.Option(
         None,
         "--output",
         "-o",
@@ -412,7 +409,7 @@ def config_cmd(
             console.print(config.model_dump_json(indent=2))
         except Exception as e:
             console.print(f"[red]Error loading config: {e}[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from e
 
     elif action == "validate":
         from finlab_sentinel.config.loader import load_config
@@ -422,7 +419,7 @@ def config_cmd(
             console.print("[green]Configuration is valid[/green]")
         except Exception as e:
             console.print(f"[red]Invalid configuration: {e}[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from e
 
     elif action == "init":
         from finlab_sentinel.config.loader import create_default_config_file
@@ -442,7 +439,10 @@ def config_cmd(
         console.print("Config file search paths:")
         for path in CONFIG_SEARCH_PATHS:
             expanded = path.expanduser()
-            exists = "[green]exists[/green]" if expanded.exists() else "[dim]not found[/dim]"
+            if expanded.exists():
+                exists = "[green]exists[/green]"
+            else:
+                exists = "[dim]not found[/dim]"
             console.print(f"  {path} -> {exists}")
 
     else:
@@ -465,19 +465,20 @@ def info() -> None:
     console.print(f"Unique Datasets: {stats['unique_datasets']}")
     console.print(f"Total Size: {_format_size(stats['total_size_bytes'])}")
 
-    if stats['oldest']:
+    if stats["oldest"]:
         console.print(f"Oldest Backup: {stats['oldest']}")
-    if stats['newest']:
+    if stats["newest"]:
         console.print(f"Newest Backup: {stats['newest']}")
 
 
 def _format_size(size_bytes: int) -> str:
     """Format bytes as human-readable size."""
+    size = float(size_bytes)
     for unit in ["B", "KB", "MB", "GB"]:
-        if size_bytes < 1024:
-            return f"{size_bytes:.1f} {unit}"
-        size_bytes /= 1024
-    return f"{size_bytes:.1f} TB"
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
 
 
 if __name__ == "__main__":

@@ -1,10 +1,6 @@
 """Tests for storage backend."""
 
-from datetime import datetime, timedelta
-from pathlib import Path
-
 import pandas as pd
-import pytest
 
 from finlab_sentinel.storage.parquet import ParquetStorage, sanitize_backup_key
 
@@ -69,15 +65,15 @@ class TestParquetStorage:
         # Check index values match
         assert list(loaded_df.index) == list(sample_df.index)
 
-    def test_load_preserves_dtypes(
-        self, parquet_storage: ParquetStorage
-    ):
+    def test_load_preserves_dtypes(self, parquet_storage: ParquetStorage):
         """Verify dtypes are preserved through save/load."""
-        df = pd.DataFrame({
-            "int_col": [1, 2, 3],
-            "float_col": [1.1, 2.2, 3.3],
-            "str_col": ["a", "b", "c"],
-        })
+        df = pd.DataFrame(
+            {
+                "int_col": [1, 2, 3],
+                "float_col": [1.1, 2.2, 3.3],
+                "str_col": ["a", "b", "c"],
+            }
+        )
 
         parquet_storage.save(
             backup_key="dtype_test",
@@ -116,9 +112,7 @@ class TestParquetStorage:
         assert len(backups) == 1
         assert backups[0].backup_key == "ds1"
 
-    def test_load_nonexistent_returns_none(
-        self, parquet_storage: ParquetStorage
-    ):
+    def test_load_nonexistent_returns_none(self, parquet_storage: ParquetStorage):
         """Verify loading nonexistent backup returns None."""
         result = parquet_storage.load_latest("nonexistent")
         assert result is None
@@ -160,9 +154,7 @@ class TestParquetStorage:
         assert metadata is not None
         assert metadata.content_hash == "new_hash"
 
-    def test_get_stats(
-        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
-    ):
+    def test_get_stats(self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame):
         """Verify storage statistics."""
         parquet_storage.save("stat_test", "test", sample_df, "hash")
 

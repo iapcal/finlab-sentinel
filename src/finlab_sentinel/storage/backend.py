@@ -6,7 +6,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
 
 import pandas as pd
 
@@ -77,7 +76,9 @@ class StorageBackend(ABC):
         ...
 
     @abstractmethod
-    def load_latest(self, backup_key: str) -> Optional[tuple[pd.DataFrame, BackupMetadata]]:
+    def load_latest(
+        self, backup_key: str
+    ) -> tuple[pd.DataFrame, BackupMetadata] | None:
         """Load most recent backup for key.
 
         Args:
@@ -93,7 +94,7 @@ class StorageBackend(ABC):
         self,
         backup_key: str,
         date: datetime,
-    ) -> Optional[tuple[pd.DataFrame, BackupMetadata]]:
+    ) -> tuple[pd.DataFrame, BackupMetadata] | None:
         """Load backup for specific date.
 
         Args:
@@ -106,7 +107,7 @@ class StorageBackend(ABC):
         ...
 
     @abstractmethod
-    def get_latest_metadata(self, backup_key: str) -> Optional[BackupMetadata]:
+    def get_latest_metadata(self, backup_key: str) -> BackupMetadata | None:
         """Get metadata for most recent backup without loading data.
 
         Args:
@@ -120,8 +121,8 @@ class StorageBackend(ABC):
     @abstractmethod
     def list_backups(
         self,
-        backup_key: Optional[str] = None,
-    ) -> List[BackupMetadata]:
+        backup_key: str | None = None,
+    ) -> list[BackupMetadata]:
         """List all backups, optionally filtered by key.
 
         Args:
@@ -148,7 +149,7 @@ class StorageBackend(ABC):
     def delete(
         self,
         backup_key: str,
-        date: Optional[datetime] = None,
+        date: datetime | None = None,
     ) -> int:
         """Delete specific backup or all backups for key.
 
@@ -168,7 +169,7 @@ class StorageBackend(ABC):
         data: pd.DataFrame,
         content_hash: str,
         dataset: str,
-        reason: Optional[str] = None,
+        reason: str | None = None,
     ) -> BackupMetadata:
         """Accept new data as the baseline, marking previous as superseded.
 

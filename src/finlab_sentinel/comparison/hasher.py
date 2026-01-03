@@ -88,6 +88,7 @@ class ContentHasher:
             return xxhash.xxh64()
         else:
             import hashlib
+
             return hashlib.sha256()
 
     def _hash_index(self, index: pd.Index, hasher) -> None:

@@ -2,9 +2,8 @@
 
 import numpy as np
 import pandas as pd
-import pytest
 
-from finlab_sentinel.comparison.differ import ChangeType, DataFrameComparer
+from finlab_sentinel.comparison.differ import DataFrameComparer
 
 
 class TestDataFrameComparer:
@@ -85,8 +84,10 @@ class TestDataFrameComparer:
 
         dates = pd.date_range("2025-01-01", periods=3)
         # Use object dtype to preserve actual NA types
-        old_df = pd.DataFrame({"col": pd.array([np.nan, "b", "c"], dtype=object)}, index=dates)
-        new_df = pd.DataFrame({"col": pd.array([pd.NA, "b", "c"], dtype=object)}, index=dates)
+        old_arr = pd.array([np.nan, "b", "c"], dtype=object)
+        new_arr = pd.array([pd.NA, "b", "c"], dtype=object)
+        old_df = pd.DataFrame({"col": old_arr}, index=dates)
+        new_df = pd.DataFrame({"col": new_arr}, index=dates)
 
         result = comparer.compare(old_df, new_df)
 

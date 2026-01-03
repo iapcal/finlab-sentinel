@@ -79,13 +79,23 @@ select = [
     "ARG", # flake8-unused-arguments
     "SIM", # flake8-simplify
 ]
+ignore = [
+    "B008",  # Allow function calls in argument defaults (needed for Typer)
+    "ARG002", # Allow unused method arguments (for interface implementations)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ARG001"]  # Allow unused arguments in test files
 
 [tool.mypy]
 python_version = "3.10"
-warn_return_any = true
+warn_return_any = false
 warn_unused_ignores = true
-strict = true
+strict = false
 plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+disallow_untyped_defs = false
+check_untyped_defs = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

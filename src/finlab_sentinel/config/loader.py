@@ -5,8 +5,9 @@ from __future__ import annotations
 import importlib
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 from finlab_sentinel.config.schema import SentinelConfig
 from finlab_sentinel.exceptions import ConfigurationError
@@ -21,7 +22,7 @@ CONFIG_SEARCH_PATHS = [
 ]
 
 
-def _find_config_file() -> Optional[Path]:
+def _find_config_file() -> Path | None:
     """Find configuration file in default locations."""
     for path in CONFIG_SEARCH_PATHS:
         expanded = path.expanduser()
@@ -87,7 +88,7 @@ def _load_callback(callback_path: str) -> Callable:
 
 
 def load_config(
-    config_path: Optional[Path] = None,
+    config_path: Path | None = None,
     *,
     auto_discover: bool = True,
 ) -> SentinelConfig:
@@ -112,7 +113,7 @@ def load_config(
     config_data: dict[str, Any] = {}
 
     # Determine config file path
-    effective_path: Optional[Path] = None
+    effective_path: Path | None = None
 
     if config_path is not None:
         effective_path = config_path.expanduser()
@@ -159,7 +160,7 @@ def create_default_config_file(path: Path) -> None:
     Args:
         path: Path where to create the config file
     """
-    default_content = '''\
+    default_content = """\
 # finlab-sentinel configuration file
 # See https://github.com/yourusername/finlab-sentinel for documentation
 
@@ -215,7 +216,7 @@ level = "INFO"
 
 # Optional log file path
 # file = "~/.finlab-sentinel/sentinel.log"
-'''
+"""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(default_content)
     logger.info(f"Created default configuration file: {path}")

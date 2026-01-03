@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Set
 
 from finlab_sentinel.comparison.differ import ComparisonResult
 
@@ -88,9 +87,7 @@ class AppendOnlyPolicy(ComparisonPolicy):
             violations.append(f"Dtype changes: {changes}")
 
         if result.na_type_changes:
-            violations.append(
-                f"{len(result.na_type_changes)} NA type changes detected"
-            )
+            violations.append(f"{len(result.na_type_changes)} NA type changes detected")
 
         return (
             f"Append-only policy violation: {'; '.join(violations)}"
@@ -180,7 +177,7 @@ class CompositePolicy(ComparisonPolicy):
 def get_policy_for_dataset(
     dataset: str,
     default_mode: str,
-    history_modifiable: Set[str],
+    history_modifiable: set[str],
     threshold: float = 0.10,
 ) -> ComparisonPolicy:
     """Get appropriate policy for a dataset.

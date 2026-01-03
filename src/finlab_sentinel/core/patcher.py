@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from finlab_sentinel.core.registry import (
     get_enabled,
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def enable(config: Optional[SentinelConfig] = None) -> None:
+def enable(config: SentinelConfig | None = None) -> None:
     """Enable sentinel monitoring by monkey patching finlab.data.get.
 
     Args:
@@ -53,8 +53,7 @@ def enable(config: Optional[SentinelConfig] = None) -> None:
         from finlab import data
     except ImportError as e:
         raise ImportError(
-            "finlab package is not installed. "
-            "Install it with: pip install finlab"
+            "finlab package is not installed. Install it with: pip install finlab"
         ) from e
 
     # Store original function
@@ -138,9 +137,7 @@ def _configure_logging(config: SentinelConfig) -> None:
         file_handler = logging.FileHandler(file_path)
         file_handler.setLevel(level)
         file_handler.setFormatter(
-            logging.Formatter(
-                "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-            )
+            logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
         )
         sentinel_logger.addHandler(file_handler)
 

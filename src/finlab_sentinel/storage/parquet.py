@@ -6,7 +6,7 @@ import hashlib
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import Literal
 
 import pandas as pd
 import pyarrow as pa
@@ -18,7 +18,7 @@ from finlab_sentinel.storage.index import BackupIndex
 logger = logging.getLogger(__name__)
 
 
-def sanitize_backup_key(dataset: str, universe_hash: Optional[str] = None) -> str:
+def sanitize_backup_key(dataset: str, universe_hash: str | None = None) -> str:
     """Convert dataset name to filesystem-safe backup key.
 
     Args:
@@ -139,7 +139,7 @@ class ParquetStorage(StorageBackend):
 
     def load_latest(
         self, backup_key: str
-    ) -> Optional[tuple[pd.DataFrame, BackupMetadata]]:
+    ) -> tuple[pd.DataFrame, BackupMetadata] | None:
         """Load most recent backup for key."""
         metadata = self.index.get_latest(backup_key)
         if metadata is None:
@@ -151,7 +151,7 @@ class ParquetStorage(StorageBackend):
         self,
         backup_key: str,
         date: datetime,
-    ) -> Optional[tuple[pd.DataFrame, BackupMetadata]]:
+    ) -> tuple[pd.DataFrame, BackupMetadata] | None:
         """Load backup for specific date."""
         metadata = self.index.get_by_date(backup_key, date)
         if metadata is None:
@@ -161,7 +161,7 @@ class ParquetStorage(StorageBackend):
 
     def _load_from_metadata(
         self, metadata: BackupMetadata
-    ) -> Optional[tuple[pd.DataFrame, BackupMetadata]]:
+    ) -> tuple[pd.DataFrame, BackupMetadata] | None:
         """Load DataFrame from metadata."""
         if not metadata.file_path.exists():
             logger.warning(f"Backup file not found: {metadata.file_path}")
@@ -172,14 +172,14 @@ class ParquetStorage(StorageBackend):
 
         return df, metadata
 
-    def get_latest_metadata(self, backup_key: str) -> Optional[BackupMetadata]:
+    def get_latest_metadata(self, backup_key: str) -> BackupMetadata | None:
         """Get metadata for most recent backup without loading data."""
         return self.index.get_latest(backup_key)
 
     def list_backups(
         self,
-        backup_key: Optional[str] = None,
-    ) -> List[BackupMetadata]:
+        backup_key: str | None = None,
+    ) -> list[BackupMetadata]:
         """List all backups, optionally filtered by key."""
         return self.index.list_all(backup_key)
 
@@ -215,7 +215,7 @@ class ParquetStorage(StorageBackend):
     def delete(
         self,
         backup_key: str,
-        date: Optional[datetime] = None,
+        date: datetime | None = None,
     ) -> int:
         """Delete specific backup or all backups for key."""
         deleted_metadata = self.index.delete_by_key(backup_key, date)
@@ -243,7 +243,7 @@ class ParquetStorage(StorageBackend):
         data: pd.DataFrame,
         content_hash: str,
         dataset: str,
-        reason: Optional[str] = None,
+        reason: str | None = None,
     ) -> BackupMetadata:
         """Accept new data as the baseline."""
         now = datetime.now()
@@ -302,6 +302,6 @@ class ParquetStorage(StorageBackend):
         stats["storage_path"] = str(self.base_path)
         return stats
 
-    def get_unique_datasets(self) -> List[str]:
+    def get_unique_datasets(self) -> list[str]:
         """Get list of unique backup keys."""
         return self.index.get_unique_keys()
