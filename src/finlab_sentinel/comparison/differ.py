@@ -55,6 +55,11 @@ class DtypeChange:
         return f"{self.column}: {self.old_dtype} -> {self.new_dtype}"
 
 
+# Maximum number of cell changes to track individually
+# Beyond this, only count is reported for performance
+MAX_CELL_CHANGES = 10
+
+
 @dataclass
 class ComparisonResult:
     """Result of DataFrame comparison."""
@@ -68,6 +73,10 @@ class ComparisonResult:
     dtype_changes: list[DtypeChange] = field(default_factory=list)
     na_type_changes: list[CellChange] = field(default_factory=list)
 
+    # Counts (may be > len(list) when exceeding MAX_CELL_CHANGES)
+    modified_cells_count: int = 0
+    na_type_changes_count: int = 0
+
     # Metrics
     old_shape: tuple[int, int] = (0, 0)
     new_shape: tuple[int, int] = (0, 0)
@@ -75,14 +84,17 @@ class ComparisonResult:
     @property
     def total_changes(self) -> int:
         """Total number of changes detected."""
+        # Use count fields which may be larger than list lengths
+        modified = max(self.modified_cells_count, len(self.modified_cells))
+        na_changes = max(self.na_type_changes_count, len(self.na_type_changes))
         return (
             len(self.added_rows)
             + len(self.deleted_rows)
             + len(self.added_columns)
             + len(self.deleted_columns)
-            + len(self.modified_cells)
+            + modified
             + len(self.dtype_changes)
-            + len(self.na_type_changes)
+            + na_changes
         )
 
     @property
@@ -100,19 +112,22 @@ class ComparisonResult:
         deleted_cells = len(self.deleted_rows) * self.old_shape[1]
         # Deleted columns affect all old rows
         deleted_cells += len(self.deleted_columns) * self.old_shape[0]
-        # Modified cells
-        modified = len(self.modified_cells) + len(self.na_type_changes)
+        # Modified cells - use count fields which may be larger than list lengths
+        modified = max(self.modified_cells_count, len(self.modified_cells))
+        na_changes = max(self.na_type_changes_count, len(self.na_type_changes))
 
-        return (deleted_cells + modified) / total
+        return (deleted_cells + modified + na_changes) / total
 
     def is_append_only(self) -> bool:
         """Check if changes are append-only (no deletions/modifications)."""
+        modified = max(self.modified_cells_count, len(self.modified_cells))
+        na_changes = max(self.na_type_changes_count, len(self.na_type_changes))
         return (
             len(self.deleted_rows) == 0
             and len(self.deleted_columns) == 0
-            and len(self.modified_cells) == 0
+            and modified == 0
             and len(self.dtype_changes) == 0
-            and len(self.na_type_changes) == 0
+            and na_changes == 0
         )
 
     def exceeds_threshold(self, threshold: float) -> bool:
@@ -130,12 +145,17 @@ class ComparisonResult:
             parts.append(f"+{len(self.added_columns)} columns")
         if self.deleted_columns:
             parts.append(f"-{len(self.deleted_columns)} columns")
-        if self.modified_cells:
-            parts.append(f"{len(self.modified_cells)} modified cells")
+
+        # Use count fields which may be larger than list lengths
+        modified = max(self.modified_cells_count, len(self.modified_cells))
+        na_changes = max(self.na_type_changes_count, len(self.na_type_changes))
+
+        if modified > 0:
+            parts.append(f"{modified} modified cells")
         if self.dtype_changes:
             parts.append(f"{len(self.dtype_changes)} dtype changes")
-        if self.na_type_changes:
-            parts.append(f"{len(self.na_type_changes)} NA type changes")
+        if na_changes > 0:
+            parts.append(f"{na_changes} NA type changes")
 
         if not parts:
             return "No changes"
@@ -173,6 +193,8 @@ class DataFrameComparer:
     ) -> ComparisonResult:
         """Compare two DataFrames and return detailed differences.
 
+        Uses vectorized numpy operations for performance on large DataFrames.
+
         Args:
             old_df: Previous/cached DataFrame
             new_df: New DataFrame from data source
@@ -200,54 +222,152 @@ class DataFrameComparer:
         result.added_columns = new_columns - old_columns
         result.deleted_columns = old_columns - new_columns
 
+        # Get common rows and columns
+        common_idx = old_df.index.intersection(new_df.index)
+        common_cols = old_df.columns.intersection(new_df.columns)
+
         # Check for dtype changes in common columns
-        common_columns = old_columns & new_columns
         if self.check_dtype:
-            for col in common_columns:
+            for col in common_cols:
                 old_dtype = str(old_df[col].dtype)
                 new_dtype = str(new_df[col].dtype)
                 if old_dtype != new_dtype:
                     result.dtype_changes.append(DtypeChange(col, old_dtype, new_dtype))
 
-        # Compare values in common rows and columns
-        common_index = old_index & new_index
+        # Early return if no common cells to compare
+        if len(common_idx) == 0 or len(common_cols) == 0:
+            result.is_identical = result.total_changes == 0
+            return result
 
-        for row in common_index:
-            for col in common_columns:
-                old_val = old_df.loc[row, col]
-                new_val = new_df.loc[row, col]
+        # Align DataFrames for vectorized comparison
+        old_aligned = old_df.loc[common_idx, common_cols]
+        new_aligned = new_df.loc[common_idx, common_cols]
 
-                # Check for NA type changes
-                if self.check_na_type:
-                    na_change = self._detect_na_type_change(old_val, new_val)
-                    if na_change:
-                        result.na_type_changes.append(
-                            CellChange(
-                                row=row,
-                                column=col,
-                                old_value=old_val,
-                                new_value=new_val,
-                                change_type=ChangeType.NA_TYPE_CHANGED,
-                            )
-                        )
-                        continue
+        # Vectorized NA detection
+        old_na = pd.isna(old_aligned)
+        new_na = pd.isna(new_aligned)
 
-                # Check for value changes
-                if not self._values_equal(old_val, new_val, old_df[col].dtype):
-                    result.modified_cells.append(
-                        CellChange(
-                            row=row,
-                            column=col,
-                            old_value=old_val,
-                            new_value=new_val,
-                            change_type=ChangeType.VALUE_MODIFIED,
-                        )
+        # Both NA → equal (NA type checked separately)
+        both_na = old_na & new_na
+
+        # One NA, one not → not equal
+        one_na = old_na ^ new_na
+
+        # Get numpy arrays for fast comparison
+        old_vals = old_aligned.values
+        new_vals = new_aligned.values
+
+        # Build comparison mask column by column (handles mixed dtypes)
+        equal_mask = np.zeros(old_vals.shape, dtype=bool)
+
+        for col_idx, col in enumerate(common_cols):
+            old_col = old_vals[:, col_idx]
+            new_col = new_vals[:, col_idx]
+            col_dtype = old_aligned[col].dtype
+
+            if pd.api.types.is_numeric_dtype(col_dtype):
+                # Numeric: use tolerance comparison
+                with np.errstate(invalid="ignore"):
+                    col_equal = np.isclose(
+                        old_col.astype(float),
+                        new_col.astype(float),
+                        rtol=self.rtol,
+                        atol=self.atol,
+                        equal_nan=True,
                     )
+            else:
+                # Non-numeric: exact equality (handle object dtype safely)
+                col_equal = np.array(
+                    [
+                        (pd.isna(o) and pd.isna(n)) or (o == n)
+                        for o, n in zip(old_col, new_col, strict=True)
+                    ]
+                )
+
+            equal_mask[:, col_idx] = col_equal
+
+        # Combine: different if one_na OR (not equal AND not both_na)
+        # one_na: one is NA, one is not → always different
+        # ~equal_mask & ~both_na: values differ and not both NA
+        diff_mask = one_na.values | (~equal_mask & ~both_na.values)
+
+        # Find difference positions
+        diff_rows, diff_cols = np.where(diff_mask)
+        diff_count = len(diff_rows)
+
+        # Set the count
+        result.modified_cells_count = diff_count
+
+        # Only create CellChange objects if within limit
+        if diff_count > 0 and diff_count <= MAX_CELL_CHANGES:
+            for i, j in zip(diff_rows, diff_cols, strict=True):
+                row_label = common_idx[i]
+                col_label = common_cols[j]
+                old_val = old_aligned.iloc[i, j]
+                new_val = new_aligned.iloc[i, j]
+                result.modified_cells.append(
+                    CellChange(
+                        row=row_label,
+                        column=col_label,
+                        old_value=old_val,
+                        new_value=new_val,
+                        change_type=ChangeType.VALUE_MODIFIED,
+                    )
+                )
+
+        # Check NA type changes (only for cells where both are NA)
+        if self.check_na_type:
+            na_type_changes = self._check_na_type_changes_vectorized(
+                old_aligned, new_aligned, both_na
+            )
+            result.na_type_changes_count = len(na_type_changes)
+            if len(na_type_changes) <= MAX_CELL_CHANGES:
+                result.na_type_changes = na_type_changes
 
         # Determine if identical
         result.is_identical = result.total_changes == 0
 
         return result
+
+    def _check_na_type_changes_vectorized(
+        self,
+        old_aligned: pd.DataFrame,
+        new_aligned: pd.DataFrame,
+        both_na: pd.DataFrame,
+    ) -> list[CellChange]:
+        """Check for NA type differences in cells where both are NA.
+
+        Args:
+            old_aligned: Aligned old DataFrame
+            new_aligned: Aligned new DataFrame
+            both_na: Boolean mask of cells where both are NA
+
+        Returns:
+            List of CellChange for NA type changes
+        """
+        if not both_na.any().any():
+            return []
+
+        na_type_changes = []
+        na_rows, na_cols = np.where(both_na.values)
+
+        for i, j in zip(na_rows, na_cols, strict=True):
+            old_val = old_aligned.iloc[i, j]
+            new_val = new_aligned.iloc[i, j]
+            if _get_na_type(old_val) != _get_na_type(new_val):
+                row_label = old_aligned.index[i]
+                col_label = old_aligned.columns[j]
+                na_type_changes.append(
+                    CellChange(
+                        row=row_label,
+                        column=col_label,
+                        old_value=old_val,
+                        new_value=new_val,
+                        change_type=ChangeType.NA_TYPE_CHANGED,
+                    )
+                )
+
+        return na_type_changes
 
     def _values_equal(
         self,

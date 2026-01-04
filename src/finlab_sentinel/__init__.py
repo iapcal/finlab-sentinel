@@ -3,7 +3,7 @@
 from finlab_sentinel.core.patcher import disable, enable, is_enabled
 from finlab_sentinel.exceptions import DataAnomalyError, SentinelError
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "__version__",
