@@ -103,13 +103,13 @@ class DataInterceptor:
         # 4. Compute hash of preprocessed data
         new_hash = self.hasher.hash_dataframe(new_data_for_comparison)
 
-        # 5. Check for existing backup (stored data is already preprocessed)
+        # 5. Check for existing backup (stored data is raw/original)
         cached = self.storage.load_latest(backup_key)
 
         if cached is None:
-            # First time - save preprocessed data as baseline
+            # First time - save original data as baseline (not preprocessed)
             logger.info(f"First backup for {dataset}, saving as baseline")
-            self.storage.save(backup_key, dataset, new_data_for_comparison, new_hash)
+            self.storage.save(backup_key, dataset, original_data, new_hash)
             return original_data
 
         cached_data, cached_metadata = cached
@@ -121,8 +121,9 @@ class DataInterceptor:
 
         logger.debug(f"Hash mismatch for {dataset}, performing full comparison")
 
-        # 7. Full comparison (both are preprocessed)
-        result = self.comparer.compare(cached_data, new_data_for_comparison)
+        # 7. Full comparison - apply preprocess to cached data for comparison
+        cached_for_comparison = preprocess_registry.apply(dataset, cached_data)
+        result = self.comparer.compare(cached_for_comparison, new_data_for_comparison)
 
         if result.is_identical:
             # Hash mismatch but identical content (shouldn't happen often)
@@ -138,12 +139,12 @@ class DataInterceptor:
         )
 
         if not policy.is_violation(result):
-            # Changes are within policy - update backup with preprocessed data
+            # Changes are within policy - update backup with original data
             logger.info(
                 f"Changes accepted for {dataset}: {result.summary()} "
                 f"[{policy.name} policy]"
             )
-            self.storage.save(backup_key, dataset, new_data_for_comparison, new_hash)
+            self.storage.save(backup_key, dataset, original_data, new_hash)
             return original_data
 
         # 9. Policy violation - create report
@@ -165,9 +166,8 @@ class DataInterceptor:
         # 11. Handle anomaly (handler may return cached or new data)
         logger.warning(f"Data anomaly detected: {report.summary}")
 
-        # Note: Handler receives preprocessed cached_data but original new_data
-        # If handler returns cached, user gets preprocessed data (limitation)
-        # If handler returns new, user gets original data
+        # Both cached_data and original_data are raw/original data
+        # Preprocess is only applied during comparison
         return self.handler.handle(report, cached_data, original_data)
 
     def _generate_backup_key(self, dataset: str) -> str:

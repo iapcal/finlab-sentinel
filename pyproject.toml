@@ -1,6 +1,6 @@
 [project]
 name = "finlab-sentinel"
-version = "0.1.3"
+version = "0.1.4"
 description = "Defensive monitoring layer for finlab data.get API - detect unexpected data changes"
 readme = "README.md"
 license = { text = "MIT" }

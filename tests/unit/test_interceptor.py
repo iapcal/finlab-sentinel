@@ -270,6 +270,92 @@ class TestDataInterceptor:
         assert len(report_files) >= 1
 
 
+class TestPreprocessHookInInterceptor:
+    """Tests for preprocess hook integration with interceptor."""
+
+    def test_storage_contains_raw_data_not_preprocessed(self, tmp_path: Path):
+        """Verify storage saves raw data, not preprocessed data."""
+        from finlab_sentinel.core.hooks import (
+            clear_preprocess_hooks,
+            register_preprocess_hook,
+        )
+
+        config = SentinelConfig(
+            storage=StorageConfig(path=tmp_path),
+            anomaly=AnomalyConfig(behavior=AnomalyBehavior.RAISE),
+        )
+
+        # Register a preprocess hook that rounds to 0 decimal places
+        register_preprocess_hook("test:dataset", lambda df: df.round(0))
+
+        try:
+            # Return data with decimal values
+            mock_fn = MagicMock(return_value=pd.DataFrame({"a": [1.234, 2.567, 3.891]}))
+            interceptor = DataInterceptor(mock_fn, config)
+
+            # First call saves baseline
+            result = interceptor("test:dataset")
+
+            # Result should be original (not rounded)
+            assert result["a"].iloc[0] == 1.234
+
+            # Stored data should also be original (not rounded)
+            cached = interceptor.storage.load_latest("test__dataset")
+            assert cached is not None
+            cached_df, _ = cached
+            assert cached_df["a"].iloc[0] == 1.234  # Raw data, not rounded
+
+        finally:
+            clear_preprocess_hooks()
+
+    def test_warn_return_cached_returns_raw_data_with_preprocess_hook(
+        self, tmp_path: Path
+    ):
+        """Verify warn_return_cached returns raw cached data, not preprocessed."""
+        from finlab_sentinel.core.hooks import (
+            clear_preprocess_hooks,
+            register_preprocess_hook,
+        )
+
+        config = SentinelConfig(
+            storage=StorageConfig(path=tmp_path),
+            anomaly=AnomalyConfig(behavior=AnomalyBehavior.WARN_RETURN_CACHED),
+        )
+
+        # Register a preprocess hook that rounds to 0 decimal places
+        register_preprocess_hook("test:dataset", lambda df: df.round(0))
+
+        call_count = 0
+
+        def mock_get(dataset, *args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return pd.DataFrame({"a": [1.234, 2.567, 3.891]}, index=[0, 1, 2])
+            else:
+                # Delete a row to trigger anomaly
+                return pd.DataFrame({"a": [1.5, 2.5]}, index=[0, 1])
+
+        try:
+            mock_fn = MagicMock(side_effect=mock_get)
+            interceptor = DataInterceptor(mock_fn, config)
+
+            # First call - saves raw data
+            first_result = interceptor("test:dataset")
+            assert first_result["a"].iloc[0] == 1.234
+
+            # Second call - should warn and return cached RAW data
+            with pytest.warns(UserWarning):
+                result = interceptor("test:dataset")
+
+            # Returned cached data should be raw (1.234), not preprocessed (1.0)
+            assert len(result) == 3
+            assert result["a"].iloc[0] == 1.234
+
+        finally:
+            clear_preprocess_hooks()
+
+
 class TestAcceptCurrentData:
     """Tests for accept_current_data function."""
 
