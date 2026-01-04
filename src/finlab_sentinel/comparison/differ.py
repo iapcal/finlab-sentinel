@@ -72,10 +72,12 @@ class ComparisonResult:
     modified_cells: list[CellChange] = field(default_factory=list)
     dtype_changes: list[DtypeChange] = field(default_factory=list)
     na_type_changes: list[CellChange] = field(default_factory=list)
+    na_to_value_cells: list[CellChange] = field(default_factory=list)
 
     # Counts (may be > len(list) when exceeding MAX_CELL_CHANGES)
     modified_cells_count: int = 0
     na_type_changes_count: int = 0
+    na_to_value_cells_count: int = 0
 
     # Metrics
     old_shape: tuple[int, int] = (0, 0)
@@ -118,10 +120,23 @@ class ComparisonResult:
 
         return (deleted_cells + modified + na_changes) / total
 
-    def is_append_only(self) -> bool:
-        """Check if changes are append-only (no deletions/modifications)."""
+    def is_append_only(self, ignore_na_to_value: bool = False) -> bool:
+        """Check if changes are append-only (no deletions/modifications).
+
+        Args:
+            ignore_na_to_value: If True, NA→value changes are allowed
+
+        Returns:
+            True if changes are append-only
+        """
         modified = max(self.modified_cells_count, len(self.modified_cells))
         na_changes = max(self.na_type_changes_count, len(self.na_type_changes))
+        na_to_value = max(self.na_to_value_cells_count, len(self.na_to_value_cells))
+
+        # If ignoring NA→value, subtract from modified count
+        if ignore_na_to_value:
+            modified = max(0, modified - na_to_value)
+
         return (
             len(self.deleted_rows) == 0
             and len(self.deleted_columns) == 0
@@ -250,7 +265,11 @@ class DataFrameComparer:
         # Both NA → equal (NA type checked separately)
         both_na = old_na & new_na
 
-        # One NA, one not → not equal
+        # NA→value: old was NA, new has value
+        na_to_value = old_na & ~new_na
+
+        # value→NA: old had value, new is NA (still counts as modified)
+        # one_na captures both directions
         one_na = old_na ^ new_na
 
         # Get numpy arrays for fast comparison
@@ -295,8 +314,13 @@ class DataFrameComparer:
         diff_rows, diff_cols = np.where(diff_mask)
         diff_count = len(diff_rows)
 
-        # Set the count
+        # Find NA→value positions
+        na_to_value_rows, na_to_value_cols = np.where(na_to_value.values)
+        na_to_value_count = len(na_to_value_rows)
+
+        # Set the counts
         result.modified_cells_count = diff_count
+        result.na_to_value_cells_count = na_to_value_count
 
         # Only create CellChange objects if within limit
         if diff_count > 0 and diff_count <= MAX_CELL_CHANGES:
@@ -306,6 +330,23 @@ class DataFrameComparer:
                 old_val = old_aligned.iloc[i, j]
                 new_val = new_aligned.iloc[i, j]
                 result.modified_cells.append(
+                    CellChange(
+                        row=row_label,
+                        column=col_label,
+                        old_value=old_val,
+                        new_value=new_val,
+                        change_type=ChangeType.VALUE_MODIFIED,
+                    )
+                )
+
+        # Track NA→value cells separately
+        if na_to_value_count > 0 and na_to_value_count <= MAX_CELL_CHANGES:
+            for i, j in zip(na_to_value_rows, na_to_value_cols, strict=True):
+                row_label = common_idx[i]
+                col_label = common_cols[j]
+                old_val = old_aligned.iloc[i, j]
+                new_val = new_aligned.iloc[i, j]
+                result.na_to_value_cells.append(
                     CellChange(
                         row=row_label,
                         column=col_label,

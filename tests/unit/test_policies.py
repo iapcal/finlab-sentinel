@@ -183,3 +183,83 @@ class TestGetPolicyForDataset:
 
         assert isinstance(policy, ThresholdPolicy)
         assert policy.threshold == 0.15
+
+    def test_allow_na_to_value_whitelist(self):
+        """Verify datasets in allow_na_to_value get ignore_na_to_value=True."""
+        policy = get_policy_for_dataset(
+            dataset="price:close",
+            default_mode="append_only",
+            history_modifiable=set(),
+            allow_na_to_value={"price:close"},
+        )
+
+        assert isinstance(policy, AppendOnlyPolicy)
+        assert policy.ignore_na_to_value is True
+
+    def test_non_whitelisted_dataset_no_ignore(self):
+        """Verify non-whitelisted datasets don't ignore NA→value."""
+        policy = get_policy_for_dataset(
+            dataset="price:open",
+            default_mode="append_only",
+            history_modifiable=set(),
+            allow_na_to_value={"price:close"},
+        )
+
+        assert isinstance(policy, AppendOnlyPolicy)
+        assert policy.ignore_na_to_value is False
+
+
+class TestAppendOnlyPolicyWithNaToValue:
+    """Tests for AppendOnlyPolicy with ignore_na_to_value."""
+
+    def test_allows_na_to_value_when_ignored(self):
+        """Verify NA→value changes are allowed when ignored."""
+        from finlab_sentinel.comparison.differ import CellChange, ChangeType
+
+        policy = AppendOnlyPolicy(ignore_na_to_value=True)
+
+        # Result with only NA→value modifications
+        result = ComparisonResult(
+            is_identical=False,
+            modified_cells=[
+                CellChange(
+                    row="2025-01-01",
+                    column="col",
+                    old_value=None,
+                    new_value=100.0,
+                    change_type=ChangeType.VALUE_MODIFIED,
+                )
+            ],
+            modified_cells_count=1,
+            na_to_value_cells_count=1,
+            old_shape=(10, 4),
+            new_shape=(10, 4),
+        )
+
+        assert not policy.is_violation(result)
+
+    def test_rejects_non_na_modifications_even_with_ignore(self):
+        """Verify normal modifications still violate even with ignore_na_to_value."""
+        from finlab_sentinel.comparison.differ import CellChange, ChangeType
+
+        policy = AppendOnlyPolicy(ignore_na_to_value=True)
+
+        # Result with regular value modifications (not NA→value)
+        result = ComparisonResult(
+            is_identical=False,
+            modified_cells=[
+                CellChange(
+                    row="2025-01-01",
+                    column="col",
+                    old_value=50.0,
+                    new_value=100.0,
+                    change_type=ChangeType.VALUE_MODIFIED,
+                )
+            ],
+            modified_cells_count=1,
+            na_to_value_cells_count=0,  # Not a NA→value change
+            old_shape=(10, 4),
+            new_shape=(10, 4),
+        )
+
+        assert policy.is_violation(result)

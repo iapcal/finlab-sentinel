@@ -136,6 +136,7 @@ class DataInterceptor:
             default_mode=self.config.comparison.policies.default_mode.value,
             history_modifiable=set(self.config.comparison.policies.history_modifiable),
             threshold=self.config.comparison.change_threshold,
+            allow_na_to_value=set(self.config.comparison.policies.allow_na_to_value),
         )
 
         if not policy.is_violation(result):

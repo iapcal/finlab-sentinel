@@ -49,6 +49,7 @@ class ComparisonPoliciesConfig(BaseModel):
 
     default_mode: PolicyMode = PolicyMode.APPEND_ONLY
     history_modifiable: list[str] = Field(default_factory=list)
+    allow_na_to_value: list[str] = Field(default_factory=list)
 
 
 class ComparisonConfig(BaseModel):

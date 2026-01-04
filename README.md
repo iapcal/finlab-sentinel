@@ -73,6 +73,8 @@ change_threshold = 0.10
 [comparison.policies]
 default_mode = "append_only"
 history_modifiable = ["fundamental_features:某些財報資料"]
+# 允許 NA→有值 的轉換（例如：預估資料後來補上）
+allow_na_to_value = ["price:收盤價"]
 
 [anomaly]
 behavior = "raise"  # raise | warn_return_cached | warn_return_new

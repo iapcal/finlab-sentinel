@@ -41,6 +41,12 @@ history_modifiable = [
     # "fundamental_features:某些財報資料",
 ]
 
+# Datasets where NA→value transitions are allowed
+# (e.g., preliminary data that gets filled in later)
+allow_na_to_value = [
+    # "price:close",
+]
+
 [anomaly]
 # Behavior when anomaly detected:
 # - raise: Throw exception (stops execution)

@@ -8,7 +8,7 @@ from finlab_sentinel.core.hooks import (
 from finlab_sentinel.core.patcher import disable, enable, is_enabled
 from finlab_sentinel.exceptions import DataAnomalyError, SentinelError
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 
 __all__ = [
     "__version__",
