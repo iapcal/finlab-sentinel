@@ -175,29 +175,71 @@ class BackupIndex:
 
             return [self._row_to_metadata(row) for row in rows]
 
-    def delete_expired(self, before_date: datetime) -> list[BackupMetadata]:
-        """Delete backups created before a date.
+    def delete_expired(
+        self, before_date: datetime, min_keep_per_key: int = 3
+    ) -> list[BackupMetadata]:
+        """Delete backups created before a date, keeping at least N per key.
 
         Args:
             before_date: Delete backups older than this
+            min_keep_per_key: Minimum number of backups to keep per backup_key
 
         Returns:
             List of deleted backup metadata
         """
         with self._connect() as conn:
-            # First fetch what we'll delete
-            rows = conn.execute(
-                "SELECT * FROM backups WHERE created_at < ?",
-                (before_date.isoformat(),),
-            ).fetchall()
+            # First, find IDs to keep (latest N per key)
+            keep_ids: set[int] = set()
+            unique_keys = [
+                row["backup_key"]
+                for row in conn.execute(
+                    "SELECT DISTINCT backup_key FROM backups"
+                ).fetchall()
+            ]
 
-            deleted = [self._row_to_metadata(row) for row in rows]
+            for key in unique_keys:
+                rows = conn.execute(
+                    """
+                    SELECT id FROM backups
+                    WHERE backup_key = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (key, min_keep_per_key),
+                ).fetchall()
+                keep_ids.update(row["id"] for row in rows)
 
-            # Then delete
-            conn.execute(
-                "DELETE FROM backups WHERE created_at < ?",
-                (before_date.isoformat(),),
-            )
+            # Delete expired backups that are NOT in keep_ids
+            if keep_ids:
+                placeholders = ",".join("?" * len(keep_ids))
+                rows = conn.execute(
+                    f"""
+                    SELECT * FROM backups
+                    WHERE created_at < ? AND id NOT IN ({placeholders})
+                    """,
+                    (before_date.isoformat(), *keep_ids),
+                ).fetchall()
+
+                deleted = [self._row_to_metadata(row) for row in rows]
+
+                conn.execute(
+                    f"""
+                    DELETE FROM backups
+                    WHERE created_at < ? AND id NOT IN ({placeholders})
+                    """,
+                    (before_date.isoformat(), *keep_ids),
+                )
+            else:
+                # No backups exist at all
+                rows = conn.execute(
+                    "SELECT * FROM backups WHERE created_at < ?",
+                    (before_date.isoformat(),),
+                ).fetchall()
+                deleted = [self._row_to_metadata(row) for row in rows]
+                conn.execute(
+                    "DELETE FROM backups WHERE created_at < ?",
+                    (before_date.isoformat(),),
+                )
 
             logger.info(f"Deleted {len(deleted)} expired backups from index")
             return deleted

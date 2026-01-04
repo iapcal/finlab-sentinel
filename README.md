@@ -26,6 +26,7 @@
   - 拋出例外（預設）
   - 警告並使用快取
   - 警告並使用新資料
+- **Preprocess Hook**: 比對前預處理（如四捨五入），支援萬用字元模式
 - **通知機制**: 支援自訂 callback（如 LINE、email 通知）
 - **CLI 工具**: 管理備份、查看差異、接受新資料
 
@@ -117,6 +118,77 @@ except DataAnomalyError as e:
     # 如果確認要接受新資料
     from finlab_sentinel.core.interceptor import accept_current_data
     accept_current_data('price:收盤價', reason="確認資料修正")
+```
+
+## Preprocess Hook
+
+Preprocess hook 讓你可以在比對前先對資料做預處理，例如四捨五入、排序欄位等。這在處理預期的浮點數精度差異時特別有用。
+
+**注意**: 預處理只用於比對，回傳給使用者的永遠是原始資料。
+
+```python
+import finlab_sentinel
+
+# 註冊特定 dataset 的 preprocess hook
+finlab_sentinel.register_preprocess_hook(
+    "price:收盤價",
+    lambda df: df.round(2)  # 四捨五入到小數第二位
+)
+
+# 支援萬用字元模式
+finlab_sentinel.register_preprocess_hook(
+    "price:*",  # 符合所有 price: 開頭的 dataset
+    lambda df: df.round(2)
+)
+
+# 也支援 ? 萬用字元（符合單一字元）
+finlab_sentinel.register_preprocess_hook(
+    "price:?",
+    lambda df: df.round(2)
+)
+
+finlab_sentinel.enable()
+
+# 使用 finlab
+from finlab import data
+close = data.get('price:收盤價')  # 比對時會先 round(2)，但回傳原始資料
+```
+
+### 進階用法
+
+```python
+import finlab_sentinel
+
+# 自訂預處理函式
+def normalize_for_comparison(df):
+    """標準化 DataFrame 以忽略預期的差異"""
+    df = df.copy()
+    # 四捨五入數值欄位
+    numeric_cols = df.select_dtypes(include=['float64', 'float32']).columns
+    df[numeric_cols] = df[numeric_cols].round(4)
+    # 排序欄位（忽略欄位順序差異）
+    df = df[sorted(df.columns)]
+    return df
+
+finlab_sentinel.register_preprocess_hook("fundamental_features:*", normalize_for_comparison)
+
+# 取消註冊
+finlab_sentinel.unregister_preprocess_hook("price:收盤價")
+
+# 清除所有 hooks
+finlab_sentinel.clear_preprocess_hooks()
+```
+
+### 優先順序
+
+當多個 pattern 都符合時，精確匹配優先於萬用字元匹配：
+
+```python
+finlab_sentinel.register_preprocess_hook("price:*", lambda df: df.round(1))
+finlab_sentinel.register_preprocess_hook("price:收盤價", lambda df: df.round(2))
+
+# "price:收盤價" 會使用 round(2)（精確匹配）
+# "price:開盤價" 會使用 round(1)（萬用字元匹配）
 ```
 
 ## 自訂通知

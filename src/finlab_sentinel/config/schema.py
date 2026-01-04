@@ -31,6 +31,7 @@ class StorageConfig(BaseModel):
 
     path: Path = Field(default=Path("~/.finlab-sentinel/"))
     retention_days: int = Field(default=7, ge=1, le=365)
+    min_backups_per_dataset: int = Field(default=3, ge=1, le=100)
     format: Literal["parquet"] = "parquet"
     compression: Literal["zstd", "snappy", "gzip", "none"] = "zstd"
 

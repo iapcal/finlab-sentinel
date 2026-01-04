@@ -30,7 +30,10 @@ def cleanup_on_startup(config: SentinelConfig) -> int:
         compression=config.storage.compression,
     )
 
-    deleted_count = storage.cleanup_expired(config.storage.retention_days)
+    deleted_count = storage.cleanup_expired(
+        config.storage.retention_days,
+        config.storage.min_backups_per_dataset,
+    )
 
     if deleted_count > 0:
         logger.info(

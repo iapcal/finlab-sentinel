@@ -83,7 +83,9 @@ class ParquetStorage(StorageBackend):
 
     def _get_backup_file(self, backup_key: str, date: datetime) -> Path:
         """Get file path for a specific backup."""
-        return self._get_backup_dir(backup_key) / f"{date.date().isoformat()}.parquet"
+        # Use minute-level timestamp to avoid same-day overwrites
+        timestamp = date.strftime("%Y-%m-%dT%H-%M")
+        return self._get_backup_dir(backup_key) / f"{timestamp}.parquet"
 
     def save(
         self,
@@ -102,7 +104,7 @@ class ParquetStorage(StorageBackend):
         # Convert to PyArrow table with metadata
         table = pa.Table.from_pandas(data)
         metadata = {
-            b"sentinel_version": b"0.1.2",
+            b"sentinel_version": b"0.1.3",
             b"created_at": now.isoformat().encode(),
             b"content_hash": content_hash.encode(),
             b"dataset": dataset.encode(),
@@ -183,12 +185,20 @@ class ParquetStorage(StorageBackend):
         """List all backups, optionally filtered by key."""
         return self.index.list_all(backup_key)
 
-    def cleanup_expired(self, retention_days: int) -> int:
-        """Remove backups older than retention period."""
+    def cleanup_expired(self, retention_days: int, min_keep_per_key: int = 3) -> int:
+        """Remove backups older than retention period.
+
+        Args:
+            retention_days: Delete backups older than this many days
+            min_keep_per_key: Always keep at least this many backups per dataset
+
+        Returns:
+            Number of backups deleted
+        """
         from datetime import timedelta
 
         cutoff = datetime.now() - timedelta(days=retention_days)
-        deleted_metadata = self.index.delete_expired(cutoff)
+        deleted_metadata = self.index.delete_expired(cutoff, min_keep_per_key)
 
         # Delete actual files
         deleted_count = 0
@@ -255,7 +265,7 @@ class ParquetStorage(StorageBackend):
         # Convert to PyArrow table with metadata
         table = pa.Table.from_pandas(data)
         metadata_dict = {
-            b"sentinel_version": b"0.1.2",
+            b"sentinel_version": b"0.1.3",
             b"created_at": now.isoformat().encode(),
             b"content_hash": content_hash.encode(),
             b"dataset": dataset.encode(),

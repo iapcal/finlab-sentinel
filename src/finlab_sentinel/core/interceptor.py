@@ -15,6 +15,7 @@ from finlab_sentinel.comparison.hasher import ContentHasher
 from finlab_sentinel.comparison.policies import get_policy_for_dataset
 from finlab_sentinel.comparison.report import AnomalyReport
 from finlab_sentinel.config.schema import SentinelConfig
+from finlab_sentinel.core.hooks import get_registry as get_preprocess_registry
 from finlab_sentinel.handlers.callback import create_handler_from_config
 from finlab_sentinel.storage.parquet import ParquetStorage, sanitize_backup_key
 
@@ -89,39 +90,46 @@ class DataInterceptor:
             # Convert FinlabDataFrame or similar to pandas DataFrame
             new_data = pd.DataFrame(new_data)
 
-        # 2. Generate backup key
+        # Keep original data to return to user
+        original_data = new_data
+
+        # 2. Apply preprocess hook if registered (for comparison only)
+        preprocess_registry = get_preprocess_registry()
+        new_data_for_comparison = preprocess_registry.apply(dataset, new_data)
+
+        # 3. Generate backup key
         backup_key = self._generate_backup_key(dataset)
 
-        # 3. Compute hash of new data
-        new_hash = self.hasher.hash_dataframe(new_data)
+        # 4. Compute hash of preprocessed data
+        new_hash = self.hasher.hash_dataframe(new_data_for_comparison)
 
-        # 4. Check for existing backup
+        # 5. Check for existing backup (stored data is already preprocessed)
         cached = self.storage.load_latest(backup_key)
 
         if cached is None:
-            # First time - save as baseline
+            # First time - save preprocessed data as baseline
             logger.info(f"First backup for {dataset}, saving as baseline")
-            self.storage.save(backup_key, dataset, new_data, new_hash)
-            return new_data
+            self.storage.save(backup_key, dataset, new_data_for_comparison, new_hash)
+            return original_data
 
         cached_data, cached_metadata = cached
 
-        # 5. Quick comparison via hash
+        # 6. Quick comparison via hash
         if new_hash == cached_metadata.content_hash:
             logger.debug(f"Hash match for {dataset}, data unchanged")
-            return new_data
+            return original_data
 
         logger.debug(f"Hash mismatch for {dataset}, performing full comparison")
 
-        # 6. Full comparison
-        result = self.comparer.compare(cached_data, new_data)
+        # 7. Full comparison (both are preprocessed)
+        result = self.comparer.compare(cached_data, new_data_for_comparison)
 
         if result.is_identical:
             # Hash mismatch but identical content (shouldn't happen often)
             logger.debug(f"Full comparison shows identical for {dataset}")
-            return new_data
+            return original_data
 
-        # 7. Apply policy
+        # 8. Apply policy
         policy = get_policy_for_dataset(
             dataset=dataset,
             default_mode=self.config.comparison.policies.default_mode.value,
@@ -130,15 +138,15 @@ class DataInterceptor:
         )
 
         if not policy.is_violation(result):
-            # Changes are within policy - update backup
+            # Changes are within policy - update backup with preprocessed data
             logger.info(
                 f"Changes accepted for {dataset}: {result.summary()} "
                 f"[{policy.name} policy]"
             )
-            self.storage.save(backup_key, dataset, new_data, new_hash)
-            return new_data
+            self.storage.save(backup_key, dataset, new_data_for_comparison, new_hash)
+            return original_data
 
-        # 8. Policy violation - create report
+        # 9. Policy violation - create report
         report = AnomalyReport(
             dataset=dataset,
             backup_key=backup_key,
@@ -150,14 +158,17 @@ class DataInterceptor:
             new_hash=new_hash,
         )
 
-        # 9. Save report if configured
+        # 10. Save report if configured
         if self.config.anomaly.save_reports:
             report.save(self.config.get_reports_path())
 
-        # 10. Handle anomaly
+        # 11. Handle anomaly (handler may return cached or new data)
         logger.warning(f"Data anomaly detected: {report.summary}")
 
-        return self.handler.handle(report, cached_data, new_data)
+        # Note: Handler receives preprocessed cached_data but original new_data
+        # If handler returns cached, user gets preprocessed data (limitation)
+        # If handler returns new, user gets original data
+        return self.handler.handle(report, cached_data, original_data)
 
     def _generate_backup_key(self, dataset: str) -> str:
         """Generate unique key for backup storage.

@@ -1,5 +1,8 @@
 """Tests for storage backend."""
 
+import time
+from datetime import datetime, timedelta
+
 import pandas as pd
 
 from finlab_sentinel.storage.parquet import ParquetStorage, sanitize_backup_key
@@ -162,3 +165,96 @@ class TestParquetStorage:
 
         assert stats["total_backups"] >= 1
         assert stats["total_size_bytes"] > 0
+
+    def test_backup_file_uses_minute_timestamp(self, parquet_storage: ParquetStorage):
+        """Verify backup filename uses minute-level timestamp."""
+        dt = datetime(2024, 1, 4, 9, 30, 45)
+        path = parquet_storage._get_backup_file("test_key", dt)
+        assert path.name == "2024-01-04T09-30.parquet"
+
+    def test_backup_file_different_minutes(self, parquet_storage: ParquetStorage):
+        """Verify different minutes produce different filenames."""
+        dt1 = datetime(2024, 1, 4, 9, 30, 0)
+        dt2 = datetime(2024, 1, 4, 9, 31, 0)
+        path1 = parquet_storage._get_backup_file("test_key", dt1)
+        path2 = parquet_storage._get_backup_file("test_key", dt2)
+        assert path1.name != path2.name
+        assert path1.name == "2024-01-04T09-30.parquet"
+        assert path2.name == "2024-01-04T09-31.parquet"
+
+    def test_multiple_backups_same_day(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
+        """Verify multiple backups on the same day are not overwritten."""
+        # Save first backup
+        parquet_storage.save("multi_test", "test", sample_df, "hash1")
+        # Wait a bit to ensure different timestamp
+        time.sleep(0.1)
+        # Modify and save again
+        modified_df = sample_df.copy()
+        modified_df.iloc[0, 0] = 999.99
+        parquet_storage.save("multi_test", "test", modified_df, "hash2")
+
+        # Both backups should exist
+        backups = parquet_storage.list_backups("multi_test")
+        assert len(backups) == 2
+
+    def test_cleanup_expired_keeps_min_per_key(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
+        """Verify cleanup keeps minimum backups per key even if all expired."""
+        # Create 5 backups with different old timestamps (spaced by minutes)
+        # This ensures different filenames
+        base_time = datetime.now() - timedelta(days=30)
+        for i in range(5):
+            parquet_storage.save("cleanup_test", "test", sample_df, f"hash{i}")
+            # Set different old timestamps (each 10 minutes apart) to get different filenames
+            with parquet_storage.index._connect() as conn:
+                old_date = (base_time - timedelta(minutes=i * 10)).isoformat()
+                conn.execute(
+                    "UPDATE backups SET created_at = ? WHERE content_hash = ?",
+                    (old_date, f"hash{i}"),
+                )
+
+        # All 5 are older than 7 days, but should keep 3 (in index)
+        parquet_storage.cleanup_expired(retention_days=7, min_keep_per_key=3)
+
+        # Index should have 3 remaining entries
+        remaining = parquet_storage.list_backups("cleanup_test")
+        assert len(remaining) == 3
+
+    def test_cleanup_expired_respects_retention_when_enough_recent(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
+        """Verify cleanup deletes old backups when enough recent ones exist."""
+        # Create 3 old backups with different timestamps
+        base_old_time = datetime.now() - timedelta(days=30)
+        for i in range(3):
+            parquet_storage.save("retention_test", "test", sample_df, f"old_hash{i}")
+            with parquet_storage.index._connect() as conn:
+                old_date = (base_old_time - timedelta(minutes=i * 10)).isoformat()
+                conn.execute(
+                    "UPDATE backups SET created_at = ? WHERE content_hash = ?",
+                    (old_date, f"old_hash{i}"),
+                )
+
+        # Create 3 recent backups with different timestamps
+        base_new_time = datetime.now()
+        for i in range(3):
+            parquet_storage.save("retention_test", "test", sample_df, f"new_hash{i}")
+            with parquet_storage.index._connect() as conn:
+                new_date = (base_new_time - timedelta(minutes=i * 10)).isoformat()
+                conn.execute(
+                    "UPDATE backups SET created_at = ? WHERE content_hash = ?",
+                    (new_date, f"new_hash{i}"),
+                )
+
+        # Should delete the 3 old ones, keep the 3 recent ones
+        parquet_storage.cleanup_expired(retention_days=7, min_keep_per_key=3)
+
+        # Index should have 3 remaining entries (the recent ones)
+        remaining = parquet_storage.list_backups("retention_test")
+        assert len(remaining) == 3
+        # All remaining should be recent (new_hash*)
+        for backup in remaining:
+            assert backup.content_hash.startswith("new_hash")
