@@ -25,7 +25,9 @@ def config_with_storage(tmp_path: Path) -> SentinelConfig:
 def config_with_min_backups(tmp_path: Path) -> SentinelConfig:
     """Create config with custom min_backups_per_dataset."""
     return SentinelConfig(
-        storage=StorageConfig(path=tmp_path, retention_days=7, min_backups_per_dataset=2)
+        storage=StorageConfig(
+            path=tmp_path, retention_days=7, min_backups_per_dataset=2
+        )
     )
 
 
@@ -80,9 +82,7 @@ class TestCleanupOnStartup:
         remaining = storage.list_backups("test")
         assert len(remaining) == 2
 
-    def test_respects_min_backups_config(
-        self, tmp_path: Path, sample_df: pd.DataFrame
-    ):
+    def test_respects_min_backups_config(self, tmp_path: Path, sample_df: pd.DataFrame):
         """Verify cleanup uses min_backups_per_dataset from config."""
         config = SentinelConfig(
             storage=StorageConfig(
