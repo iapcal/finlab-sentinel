@@ -337,6 +337,12 @@ class DataFrameComparer:
     ) -> list[CellChange]:
         """Check for NA type differences in cells where both are NA.
 
+        For non-object columns with matching dtypes, all NAs are the same type
+        (e.g., float64 always uses np.nan, Float64 always uses pd.NA).
+        NA type differences can only occur in object columns or when dtypes differ.
+        Since dtype differences are already detected separately, we only check
+        object columns here for performance.
+
         Args:
             old_aligned: Aligned old DataFrame
             new_aligned: Aligned new DataFrame
@@ -348,13 +354,35 @@ class DataFrameComparer:
         if not both_na.any().any():
             return []
 
-        na_type_changes = []
+        # Only object columns can have mixed NA types (None, pd.NA, np.nan)
+        # Non-object columns always have consistent NA type based on dtype
+        object_col_indices = set()
+        for idx, col in enumerate(old_aligned.columns):
+            if old_aligned[col].dtype == object or new_aligned[col].dtype == object:
+                object_col_indices.add(idx)
+
+        # Fast path: no object columns means no possible NA type differences
+        if not object_col_indices:
+            return []
+
+        na_type_changes: list[CellChange] = []
         na_rows, na_cols = np.where(both_na.values)
 
+        # Use .values for fast numpy indexing instead of .iloc
+        old_vals = old_aligned.values
+        new_vals = new_aligned.values
+
         for i, j in zip(na_rows, na_cols, strict=True):
-            old_val = old_aligned.iloc[i, j]
-            new_val = new_aligned.iloc[i, j]
+            # Skip non-object columns (they have consistent NA types)
+            if j not in object_col_indices:
+                continue
+
+            old_val = old_vals[i, j]
+            new_val = new_vals[i, j]
             if _get_na_type(old_val) != _get_na_type(new_val):
+                # Stop collecting after MAX_CELL_CHANGES (count will still be accurate)
+                if len(na_type_changes) >= MAX_CELL_CHANGES:
+                    continue
                 row_label = old_aligned.index[i]
                 col_label = old_aligned.columns[j]
                 na_type_changes.append(
