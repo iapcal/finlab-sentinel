@@ -205,3 +205,78 @@ class TestDataFrameComparer:
         assert result.na_to_value_cells_count == 0
         # Still not append-only even with ignore
         assert not result.is_append_only(ignore_na_to_value=True)
+
+    def test_compare_float64_nullable_with_pd_na(self):
+        """Verify Float64 columns with pd.NA are compared correctly.
+
+        Regression test for: Float64 + pd.NA causes TypeError when DataFrame
+        has mixed dtypes (object array from .values preserves pd.NA).
+        """
+        comparer = DataFrameComparer()
+
+        dates = pd.date_range("2025-01-01", periods=4)
+
+        # Mixed dtypes trigger object array from .values
+        old_df = pd.DataFrame(
+            {
+                "float64_col": [1.0, 2.0, np.nan, 4.0],
+                "Float64_col": pd.array([10.0, pd.NA, 30.0, 40.0], dtype="Float64"),
+                "str_col": ["a", "b", "c", "d"],
+            },
+            index=dates,
+        )
+
+        new_df = old_df.copy()
+
+        # This should not raise TypeError
+        result = comparer.compare(old_df, new_df)
+
+        assert result.is_identical
+        assert result.modified_cells_count == 0
+
+    def test_compare_float64_nullable_na_to_value(self):
+        """Verify Float64 NA->value transitions are detected."""
+        comparer = DataFrameComparer()
+
+        dates = pd.date_range("2025-01-01", periods=3)
+
+        old_df = pd.DataFrame(
+            {
+                "Float64_col": pd.array([10.0, pd.NA, 30.0], dtype="Float64"),
+                "str_col": ["a", "b", "c"],
+            },
+            index=dates,
+        )
+        new_df = pd.DataFrame(
+            {
+                "Float64_col": pd.array([10.0, 20.0, 30.0], dtype="Float64"),
+                "str_col": ["a", "b", "c"],
+            },
+            index=dates,
+        )
+
+        result = comparer.compare(old_df, new_df)
+
+        assert not result.is_identical
+        assert result.modified_cells_count == 1
+        assert result.na_to_value_cells_count == 1
+
+    def test_compare_int64_nullable_with_pd_na(self):
+        """Verify Int64 (nullable integer) columns with pd.NA work correctly."""
+        comparer = DataFrameComparer()
+
+        dates = pd.date_range("2025-01-01", periods=3)
+
+        old_df = pd.DataFrame(
+            {
+                "Int64_col": pd.array([1, pd.NA, 3], dtype="Int64"),
+                "str_col": ["a", "b", "c"],
+            },
+            index=dates,
+        )
+
+        new_df = old_df.copy()
+
+        result = comparer.compare(old_df, new_df)
+
+        assert result.is_identical

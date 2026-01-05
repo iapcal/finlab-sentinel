@@ -280,22 +280,27 @@ class DataFrameComparer:
         equal_mask = np.zeros(old_vals.shape, dtype=bool)
 
         for col_idx, col in enumerate(common_cols):
-            old_col = old_vals[:, col_idx]
-            new_col = new_vals[:, col_idx]
             col_dtype = old_aligned[col].dtype
 
             if pd.api.types.is_numeric_dtype(col_dtype):
                 # Numeric: use tolerance comparison
+                # Use to_numpy() with na_value to handle nullable types (Float64, Int64)
+                # which may contain pd.NA that cannot be converted via astype(float)
+                old_col_float = old_aligned[col].to_numpy(dtype=float, na_value=np.nan)
+                new_col_float = new_aligned[col].to_numpy(dtype=float, na_value=np.nan)
+
                 with np.errstate(invalid="ignore"):
                     col_equal = np.isclose(
-                        old_col.astype(float),
-                        new_col.astype(float),
+                        old_col_float,
+                        new_col_float,
                         rtol=self.rtol,
                         atol=self.atol,
                         equal_nan=True,
                     )
             else:
                 # Non-numeric: exact equality (handle object dtype safely)
+                old_col = old_vals[:, col_idx]
+                new_col = new_vals[:, col_idx]
                 col_equal = np.array(
                     [
                         (pd.isna(o) and pd.isna(n)) or (o == n)
