@@ -277,6 +277,70 @@ class TestParquetStorage:
         result = parquet_storage.load_by_date("nonexistent", datetime.now())
         assert result is None
 
+    def test_load_at_time(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
+        """Verify loading backup at specific datetime."""
+        # Save first backup
+        parquet_storage.save("time_test", "test", sample_df, "hash1")
+        first_backup_time = datetime.now()
+
+        # Wait a bit and save second backup
+        time.sleep(0.2)
+        modified_df = sample_df.copy()
+        modified_df.iloc[0, 0] = 999.99
+        parquet_storage.save("time_test", "test", modified_df, "hash2")
+
+        # Load at time between the two backups
+        result = parquet_storage.load_at_time("time_test", first_backup_time + timedelta(seconds=0.1))
+
+        assert result is not None
+        loaded_df, metadata = result
+        assert metadata.content_hash == "hash1"
+        # Verify it's the first backup data
+        assert loaded_df.iloc[0, 0] != 999.99
+
+    def test_load_at_time_returns_latest_before_target(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
+        """Verify load_at_time returns most recent backup before target time."""
+        base_time = datetime.now() - timedelta(hours=3)
+
+        # Save 3 backups at different times
+        for i in range(3):
+            parquet_storage.save("multi_time_test", "test", sample_df, f"hash{i}")
+            with parquet_storage.index._connect() as conn:
+                backup_time = (base_time + timedelta(hours=i)).isoformat()
+                conn.execute(
+                    "UPDATE backups SET created_at = ? WHERE content_hash = ?",
+                    (backup_time, f"hash{i}"),
+                )
+
+        # Query at time between backup 1 and 2
+        target_time = base_time + timedelta(hours=1, minutes=30)
+        result = parquet_storage.load_at_time("multi_time_test", target_time)
+
+        assert result is not None
+        _, metadata = result
+        assert metadata.content_hash == "hash1"
+
+    def test_load_at_time_not_found(self, parquet_storage: ParquetStorage):
+        """Verify load_at_time returns None for nonexistent backup."""
+        result = parquet_storage.load_at_time("nonexistent", datetime.now())
+        assert result is None
+
+    def test_load_at_time_before_all_backups(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
+        """Verify load_at_time returns None when target is before all backups."""
+        parquet_storage.save("before_test", "test", sample_df, "hash1")
+
+        # Query at time before any backups
+        past_time = datetime.now() - timedelta(days=1)
+        result = parquet_storage.load_at_time("before_test", past_time)
+
+        assert result is None
+
     def test_load_missing_file_returns_none(
         self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
     ):
@@ -449,6 +513,34 @@ class TestBackupIndex:
     def test_get_by_date_not_found(self, parquet_storage: ParquetStorage):
         """Verify get_by_date returns None for missing date."""
         metadata = parquet_storage.index.get_by_date("nonexistent", datetime.now())
+        assert metadata is None
+
+    def test_get_at_time(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
+        """Verify get_at_time returns correct backup metadata."""
+        parquet_storage.save("attime_test", "test", sample_df, "hash1")
+
+        now = datetime.now()
+        metadata = parquet_storage.index.get_at_time("attime_test", now)
+
+        assert metadata is not None
+        assert metadata.content_hash == "hash1"
+
+    def test_get_at_time_not_found(self, parquet_storage: ParquetStorage):
+        """Verify get_at_time returns None for missing backup."""
+        metadata = parquet_storage.index.get_at_time("nonexistent", datetime.now())
+        assert metadata is None
+
+    def test_get_at_time_before_all_backups(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
+        """Verify get_at_time returns None when target is before all backups."""
+        parquet_storage.save("before_all_test", "test", sample_df, "hash1")
+
+        past_time = datetime.now() - timedelta(days=1)
+        metadata = parquet_storage.index.get_at_time("before_all_test", past_time)
+
         assert metadata is None
 
     def test_delete_by_key_with_date(

@@ -149,6 +149,36 @@ class BackupIndex:
 
             return self._row_to_metadata(row)
 
+    def get_at_time(
+        self, backup_key: str, target_time: datetime
+    ) -> BackupMetadata | None:
+        """Get backup metadata at or before a specific datetime.
+
+        Args:
+            backup_key: The backup key
+            target_time: Target datetime
+
+        Returns:
+            Most recent metadata at or before target_time, or None
+        """
+        # Find backup closest to and not after the target datetime
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM backups
+                WHERE backup_key = ?
+                AND created_at <= ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (backup_key, target_time.isoformat()),
+            ).fetchone()
+
+            if row is None:
+                return None
+
+            return self._row_to_metadata(row)
+
     def list_all(self, backup_key: str | None = None) -> list[BackupMetadata]:
         """List all backups, optionally filtered by key.
 

@@ -161,6 +161,18 @@ class ParquetStorage(StorageBackend):
 
         return self._load_from_metadata(metadata)
 
+    def load_at_time(
+        self,
+        backup_key: str,
+        target_time: datetime,
+    ) -> tuple[pd.DataFrame, BackupMetadata] | None:
+        """Load backup at or before specific datetime."""
+        metadata = self.index.get_at_time(backup_key, target_time)
+        if metadata is None:
+            return None
+
+        return self._load_from_metadata(metadata)
+
     def _load_from_metadata(
         self, metadata: BackupMetadata
     ) -> tuple[pd.DataFrame, BackupMetadata] | None:

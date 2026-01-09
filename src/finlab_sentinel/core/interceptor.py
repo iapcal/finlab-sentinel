@@ -16,6 +16,8 @@ from finlab_sentinel.comparison.policies import get_policy_for_dataset
 from finlab_sentinel.comparison.report import AnomalyReport
 from finlab_sentinel.config.schema import SentinelConfig
 from finlab_sentinel.core.hooks import get_registry as get_preprocess_registry
+from finlab_sentinel.core.time_travel import TimeTravelContext
+from finlab_sentinel.exceptions import NoHistoricalDataError
 from finlab_sentinel.handlers.callback import create_handler_from_config
 from finlab_sentinel.storage.parquet import ParquetStorage, sanitize_backup_key
 
@@ -77,6 +79,11 @@ class DataInterceptor:
             DataFrame (either new, cached, or as determined by handler)
         """
         logger.debug(f"Intercepting data.get for: {dataset}")
+
+        # 0. Check time travel mode
+        tt_context = TimeTravelContext.get_instance()
+        if tt_context.is_active():
+            return self._handle_time_travel(dataset, tt_context.target_time)
 
         # 1. Call original data.get
         try:
@@ -212,6 +219,49 @@ class DataInterceptor:
             logger.debug(f"Could not get universe hash: {e}")
 
         return None
+
+    def _handle_time_travel(
+        self,
+        dataset: str,
+        target_time: datetime | None,
+    ) -> pd.DataFrame:
+        """Handle time travel mode data retrieval.
+
+        Args:
+            dataset: Dataset name
+            target_time: Target datetime to travel to
+
+        Returns:
+            Historical DataFrame from backup
+
+        Raises:
+            NoHistoricalDataError: If no backup exists before target time
+        """
+        if target_time is None:
+            msg = "Time travel mode is active but target_time is None"
+            raise NoHistoricalDataError(msg)
+
+        backup_key = self._generate_backup_key(dataset)
+
+        # Try to load historical backup
+        result = self.storage.load_at_time(backup_key, target_time)
+
+        if result is None:
+            target_iso = target_time.isoformat()
+            msg = (
+                f"No backup found for '{dataset}' at or before {target_iso}. "
+                f"Time travel requires historical backups to exist."
+            )
+            raise NoHistoricalDataError(msg)
+
+        cached_data, metadata = result
+
+        logger.info(
+            f"[Time Travel] Loaded backup from {metadata.created_at.isoformat()} "
+            f"for '{dataset}' (requested: {target_time.isoformat()})"
+        )
+
+        return cached_data
 
 
 def accept_current_data(
