@@ -1,8 +1,14 @@
 """Tests for comparison policies."""
 
-from finlab_sentinel.comparison.differ import ComparisonResult, DtypeChange
+from finlab_sentinel.comparison.differ import (
+    CellChange,
+    ChangeType,
+    ComparisonResult,
+    DtypeChange,
+)
 from finlab_sentinel.comparison.policies import (
     AppendOnlyPolicy,
+    CompositePolicy,
     PermissivePolicy,
     ThresholdPolicy,
     get_policy_for_dataset,
@@ -208,14 +214,285 @@ class TestGetPolicyForDataset:
         assert isinstance(policy, AppendOnlyPolicy)
         assert policy.ignore_na_to_value is False
 
+    def test_default_mode_permissive(self):
+        """Verify permissive mode returns PermissivePolicy."""
+        policy = get_policy_for_dataset(
+            dataset="price:close",
+            default_mode="permissive",
+            history_modifiable=set(),
+        )
+
+        assert isinstance(policy, PermissivePolicy)
+
+    def test_unknown_mode_defaults_to_append_only(self):
+        """Verify unknown mode defaults to append_only."""
+        policy = get_policy_for_dataset(
+            dataset="price:close",
+            default_mode="unknown_mode",
+            history_modifiable=set(),
+        )
+
+        assert isinstance(policy, AppendOnlyPolicy)
+
+
+class TestAppendOnlyPolicyViolationMessages:
+    """Tests for AppendOnlyPolicy violation message formatting."""
+
+    def test_violation_message_many_deleted_rows(self):
+        """Verify violation message truncates long row lists."""
+        policy = AppendOnlyPolicy()
+
+        # Create result with more than 5 deleted rows
+        result = ComparisonResult(
+            is_identical=False,
+            deleted_rows=set(range(10)),  # 10 deleted rows
+            old_shape=(20, 4),
+            new_shape=(10, 4),
+        )
+
+        message = policy.get_violation_message(result)
+        assert "Deleted 10 rows" in message
+        assert "..." in message
+
+    def test_violation_message_few_deleted_rows(self):
+        """Verify violation message shows all rows when few."""
+        policy = AppendOnlyPolicy()
+
+        result = ComparisonResult(
+            is_identical=False,
+            deleted_rows={"row1", "row2"},
+            old_shape=(10, 4),
+            new_shape=(8, 4),
+        )
+
+        message = policy.get_violation_message(result)
+        assert "Deleted rows:" in message
+        assert "..." not in message
+
+    def test_violation_message_many_deleted_columns(self):
+        """Verify violation message truncates long column lists."""
+        policy = AppendOnlyPolicy()
+
+        result = ComparisonResult(
+            is_identical=False,
+            deleted_columns={f"col{i}" for i in range(10)},
+            old_shape=(10, 15),
+            new_shape=(10, 5),
+        )
+
+        message = policy.get_violation_message(result)
+        assert "Deleted 10 columns" in message
+        assert "..." in message
+
+    def test_violation_message_few_deleted_columns(self):
+        """Verify violation message shows all columns when few."""
+        policy = AppendOnlyPolicy()
+
+        result = ComparisonResult(
+            is_identical=False,
+            deleted_columns={"col1", "col2"},
+            old_shape=(10, 6),
+            new_shape=(10, 4),
+        )
+
+        message = policy.get_violation_message(result)
+        assert "Deleted columns:" in message
+
+    def test_violation_message_modified_cells(self):
+        """Verify violation message includes modified cells info."""
+        policy = AppendOnlyPolicy()
+
+        result = ComparisonResult(
+            is_identical=False,
+            modified_cells=[
+                CellChange("row1", "col1", 1.0, 2.0, ChangeType.VALUE_MODIFIED),
+            ],
+            old_shape=(10, 4),
+            new_shape=(10, 4),
+        )
+
+        message = policy.get_violation_message(result)
+        assert "cells modified" in message
+
+    def test_violation_message_dtype_changes(self):
+        """Verify violation message includes dtype changes."""
+        policy = AppendOnlyPolicy()
+
+        result = ComparisonResult(
+            is_identical=False,
+            dtype_changes=[DtypeChange("col1", "float64", "int64")],
+            old_shape=(10, 4),
+            new_shape=(10, 4),
+        )
+
+        message = policy.get_violation_message(result)
+        assert "Dtype changes" in message
+
+    def test_violation_message_na_type_changes(self):
+        """Verify violation message includes NA type changes."""
+        policy = AppendOnlyPolicy()
+
+        result = ComparisonResult(
+            is_identical=False,
+            na_type_changes=[
+                CellChange(
+                    "row1", "col1", None, float("nan"), ChangeType.NA_TYPE_CHANGED
+                )
+            ],
+            na_type_changes_count=1,
+            old_shape=(10, 4),
+            new_shape=(10, 4),
+        )
+
+        message = policy.get_violation_message(result)
+        assert "NA type changes" in message
+
+    def test_violation_message_no_violations(self):
+        """Verify message when no violations."""
+        policy = AppendOnlyPolicy()
+
+        result = ComparisonResult(
+            is_identical=True,
+            old_shape=(10, 4),
+            new_shape=(10, 4),
+        )
+
+        message = policy.get_violation_message(result)
+        assert message == "No violations"
+
+
+class TestThresholdPolicyExtended:
+    """Extended tests for ThresholdPolicy."""
+
+    def test_name_property(self):
+        """Verify name property returns correct value."""
+        policy = ThresholdPolicy(threshold=0.10)
+        assert policy.name == "threshold"
+
+    def test_get_violation_message(self):
+        """Verify violation message includes ratio and threshold."""
+        policy = ThresholdPolicy(threshold=0.10)
+
+        result = ComparisonResult(
+            is_identical=False,
+            deleted_rows=set(range(20)),
+            old_shape=(100, 10),
+            new_shape=(80, 10),
+        )
+
+        message = policy.get_violation_message(result)
+        assert "exceeds threshold" in message
+        assert "10.0%" in message  # threshold
+
+
+class TestPermissivePolicyExtended:
+    """Extended tests for PermissivePolicy."""
+
+    def test_name_property(self):
+        """Verify name property returns correct value."""
+        policy = PermissivePolicy()
+        assert policy.name == "permissive"
+
+    def test_get_violation_message(self):
+        """Verify violation message for permissive policy."""
+        policy = PermissivePolicy()
+
+        result = ComparisonResult(
+            is_identical=False,
+            deleted_rows={"row1"},
+            old_shape=(10, 4),
+            new_shape=(9, 4),
+        )
+
+        message = policy.get_violation_message(result)
+        assert "all changes allowed" in message
+
+
+class TestCompositePolicy:
+    """Tests for CompositePolicy."""
+
+    def test_name_combines_policy_names(self):
+        """Verify name includes all policy names."""
+        policy = CompositePolicy([AppendOnlyPolicy(), ThresholdPolicy(0.10)])
+
+        assert "append_only" in policy.name
+        assert "threshold" in policy.name
+        assert "composite" in policy.name
+
+    def test_violation_when_any_policy_violated(self):
+        """Verify violation occurs if any policy is violated."""
+        # Threshold policy with low threshold
+        policy = CompositePolicy([AppendOnlyPolicy(), ThresholdPolicy(0.05)])
+
+        # This violates append_only (deleted rows)
+        result = ComparisonResult(
+            is_identical=False,
+            deleted_rows={"row1"},
+            old_shape=(10, 4),
+            new_shape=(9, 4),
+        )
+
+        assert policy.is_violation(result) is True
+
+    def test_no_violation_when_all_policies_pass(self):
+        """Verify no violation when all policies pass."""
+        policy = CompositePolicy(
+            [
+                PermissivePolicy(),  # Always passes
+            ]
+        )
+
+        result = ComparisonResult(
+            is_identical=False,
+            deleted_rows={"row1"},
+            old_shape=(10, 4),
+            new_shape=(9, 4),
+        )
+
+        assert policy.is_violation(result) is False
+
+    def test_get_violation_message_combines_messages(self):
+        """Verify violation message combines all violated policies."""
+        policy = CompositePolicy(
+            [
+                AppendOnlyPolicy(),
+                ThresholdPolicy(0.01),  # Very low threshold
+            ]
+        )
+
+        # This violates both policies
+        result = ComparisonResult(
+            is_identical=False,
+            deleted_rows=set(range(50)),  # 50 deleted rows
+            old_shape=(100, 10),
+            new_shape=(50, 10),
+        )
+
+        message = policy.get_violation_message(result)
+        assert "Append-only policy violation" in message
+        assert "exceeds threshold" in message
+        assert "|" in message  # separator
+
+    def test_get_violation_message_no_violations(self):
+        """Verify message when no violations."""
+        policy = CompositePolicy([PermissivePolicy()])
+
+        result = ComparisonResult(
+            is_identical=False,
+            deleted_rows={"row1"},
+            old_shape=(10, 4),
+            new_shape=(9, 4),
+        )
+
+        message = policy.get_violation_message(result)
+        assert message == "No violations"
+
 
 class TestAppendOnlyPolicyWithNaToValue:
     """Tests for AppendOnlyPolicy with ignore_na_to_value."""
 
     def test_allows_na_to_value_when_ignored(self):
         """Verify NA→value changes are allowed when ignored."""
-        from finlab_sentinel.comparison.differ import CellChange, ChangeType
-
         policy = AppendOnlyPolicy(ignore_na_to_value=True)
 
         # Result with only NA→value modifications
