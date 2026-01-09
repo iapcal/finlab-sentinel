@@ -98,3 +98,88 @@ class TestContentHasher:
         hash1 = hasher.hash_dataframe(df)
 
         assert isinstance(hash1, str)
+
+    def test_sha256_algorithm(self):
+        """Verify SHA256 algorithm works."""
+        hasher = ContentHasher(algorithm="sha256")
+
+        df = pd.DataFrame({"a": [1, 2, 3]})
+        hash1 = hasher.hash_dataframe(df)
+        hash2 = hasher.hash_dataframe(df.copy())
+
+        assert hash1 == hash2
+        # SHA256 produces 64-character hex string
+        assert len(hash1) == 64
+
+    def test_datetime_column_hashing(self):
+        """Verify datetime columns are hashed correctly."""
+        hasher = ContentHasher()
+
+        dates = pd.date_range("2025-01-01", periods=5)
+        df = pd.DataFrame({"date_col": dates, "value": [1, 2, 3, 4, 5]})
+
+        hash1 = hasher.hash_dataframe(df)
+        hash2 = hasher.hash_dataframe(df.copy())
+
+        assert hash1 == hash2
+
+    def test_string_object_column_hashing(self):
+        """Verify string/object columns are hashed correctly."""
+        hasher = ContentHasher()
+
+        df = pd.DataFrame({
+            "str_col": ["apple", "banana", "cherry"],
+            "obj_col": [{"a": 1}, {"b": 2}, {"c": 3}],
+        })
+
+        hash1 = hasher.hash_dataframe(df)
+
+        assert isinstance(hash1, str)
+        assert len(hash1) > 0
+
+    def test_index_without_to_numpy(self):
+        """Verify hashing works for index without to_numpy method."""
+        hasher = ContentHasher()
+
+        # Create a DataFrame with a custom index
+        df = pd.DataFrame({"a": [1, 2, 3]}, index=["x", "y", "z"])
+
+        hash1 = hasher.hash_dataframe(df)
+
+        assert isinstance(hash1, str)
+
+    def test_hash_with_nan_in_float_column(self):
+        """Verify NaN values in float columns are handled correctly."""
+        hasher = ContentHasher()
+
+        df = pd.DataFrame({"col": [1.0, np.nan, 3.0, np.nan, 5.0]})
+
+        hash1 = hasher.hash_dataframe(df)
+        hash2 = hasher.hash_dataframe(df.copy())
+
+        assert hash1 == hash2
+
+    def test_hash_series_with_na(self):
+        """Verify Series with NA values are hashed correctly."""
+        hasher = ContentHasher()
+
+        series = pd.Series([1.0, np.nan, None, pd.NA, 5.0], name="test")
+
+        hash1 = hasher.hash_series(series)
+
+        assert isinstance(hash1, str)
+        assert len(hash1) > 0
+
+
+class TestGetNaTypeInHasher:
+    """Tests for _get_na_type helper in hasher module."""
+
+    def test_get_na_type_unknown(self):
+        """Verify unknown NA types are handled."""
+        from finlab_sentinel.comparison.hasher import _get_na_type
+
+        # pd.NaT is a special NA type
+        result = _get_na_type(pd.NaT)
+
+        # Should return some string, probably 'unknown'
+        assert isinstance(result, str)

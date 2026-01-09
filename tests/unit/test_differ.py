@@ -280,3 +280,247 @@ class TestDataFrameComparer:
         result = comparer.compare(old_df, new_df)
 
         assert result.is_identical
+
+    def test_no_common_cells(self):
+        """Verify comparison when there are no common rows/columns."""
+        comparer = DataFrameComparer()
+
+        old_df = pd.DataFrame({"a": [1, 2]}, index=[0, 1])
+        new_df = pd.DataFrame({"b": [3, 4]}, index=[2, 3])
+
+        result = comparer.compare(old_df, new_df)
+
+        # All rows and columns are different
+        assert len(result.added_rows) == 2
+        assert len(result.deleted_rows) == 2
+        assert len(result.added_columns) == 1
+        assert len(result.deleted_columns) == 1
+        assert not result.is_identical
+
+    def test_summary_no_changes(self):
+        """Verify summary for identical data."""
+        comparer = DataFrameComparer()
+
+        df = pd.DataFrame({"a": [1, 2, 3]})
+        result = comparer.compare(df, df.copy())
+
+        assert result.summary() == "No changes"
+
+    def test_summary_with_added_rows(self):
+        """Verify summary includes added rows."""
+        comparer = DataFrameComparer()
+
+        old_df = pd.DataFrame({"a": [1, 2]}, index=[0, 1])
+        new_df = pd.DataFrame({"a": [1, 2, 3]}, index=[0, 1, 2])
+
+        result = comparer.compare(old_df, new_df)
+
+        assert "+1 rows" in result.summary()
+
+    def test_summary_with_deleted_rows(self):
+        """Verify summary includes deleted rows."""
+        comparer = DataFrameComparer()
+
+        old_df = pd.DataFrame({"a": [1, 2, 3]}, index=[0, 1, 2])
+        new_df = pd.DataFrame({"a": [1, 2]}, index=[0, 1])
+
+        result = comparer.compare(old_df, new_df)
+
+        assert "-1 rows" in result.summary()
+
+    def test_summary_with_columns(self):
+        """Verify summary includes column changes."""
+        comparer = DataFrameComparer()
+
+        old_df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
+        new_df = pd.DataFrame({"a": [1, 2], "c": [5, 6]})
+
+        result = comparer.compare(old_df, new_df)
+
+        assert "+1 columns" in result.summary()
+        assert "-1 columns" in result.summary()
+
+    def test_summary_with_dtype_changes(self):
+        """Verify summary includes dtype changes."""
+        comparer = DataFrameComparer()
+
+        old_df = pd.DataFrame({"a": [1.0, 2.0, 3.0]})
+        new_df = pd.DataFrame({"a": pd.array([1, 2, 3], dtype="Int64")})
+
+        result = comparer.compare(old_df, new_df)
+
+        assert "dtype changes" in result.summary()
+
+    def test_change_ratio_with_empty_dfs(self):
+        """Verify change_ratio handles empty DataFrames."""
+        from finlab_sentinel.comparison.differ import ComparisonResult
+
+        result = ComparisonResult(
+            is_identical=True,
+            old_shape=(0, 0),
+            new_shape=(0, 0),
+        )
+
+        assert result.change_ratio == 0.0
+
+    def test_exceeds_threshold(self):
+        """Verify exceeds_threshold method."""
+        comparer = DataFrameComparer()
+
+        old_df = pd.DataFrame({"a": [1, 2, 3, 4, 5]}, index=range(5))
+        new_df = pd.DataFrame({"a": [1, 2]}, index=range(2))  # Delete 3 rows
+
+        result = comparer.compare(old_df, new_df)
+
+        # 60% change (3 out of 5 rows deleted)
+        assert result.exceeds_threshold(0.50)
+        assert not result.exceeds_threshold(0.80)
+
+    def test_check_dtype_disabled(self):
+        """Verify dtype check can be disabled."""
+        comparer = DataFrameComparer(check_dtype=False)
+
+        old_df = pd.DataFrame({"a": [1.0, 2.0, 3.0]})
+        new_df = pd.DataFrame({"a": pd.array([1, 2, 3], dtype="Int64")})
+
+        result = comparer.compare(old_df, new_df)
+
+        # No dtype changes should be detected
+        assert len(result.dtype_changes) == 0
+
+    def test_check_na_type_disabled(self):
+        """Verify NA type check can be disabled."""
+        comparer = DataFrameComparer(check_na_type=False)
+
+        dates = pd.date_range("2025-01-01", periods=2)
+        old_arr = pd.array([np.nan, "b"], dtype=object)
+        new_arr = pd.array([pd.NA, "b"], dtype=object)
+        old_df = pd.DataFrame({"col": old_arr}, index=dates)
+        new_df = pd.DataFrame({"col": new_arr}, index=dates)
+
+        result = comparer.compare(old_df, new_df)
+
+        # No NA type changes should be detected
+        assert len(result.na_type_changes) == 0
+
+    def test_many_modified_cells_count_only(self):
+        """Verify large changes only track count, not all details."""
+        from finlab_sentinel.comparison.differ import MAX_CELL_CHANGES
+
+        comparer = DataFrameComparer()
+
+        # Create DataFrames with many cell changes
+        size = MAX_CELL_CHANGES + 5
+        old_df = pd.DataFrame({"a": range(size)})
+        new_df = pd.DataFrame({"a": range(100, 100 + size)})  # All different
+
+        result = comparer.compare(old_df, new_df)
+
+        # Count should be accurate
+        assert result.modified_cells_count == size
+        # But list should not contain all of them
+        assert len(result.modified_cells) <= MAX_CELL_CHANGES
+
+
+class TestCellChange:
+    """Tests for CellChange dataclass."""
+
+    def test_str_value_modified(self):
+        """Verify string representation for value modification."""
+        from finlab_sentinel.comparison.differ import CellChange, ChangeType
+
+        change = CellChange(
+            row="2025-01-01",
+            column="2330",
+            old_value=100.0,
+            new_value=200.0,
+            change_type=ChangeType.VALUE_MODIFIED,
+        )
+
+        result = str(change)
+        assert "2025-01-01" in result
+        assert "2330" in result
+        assert "100.0" in result
+        assert "200.0" in result
+        assert "->" in result
+
+    def test_str_na_type_changed(self):
+        """Verify string representation for NA type change."""
+        from finlab_sentinel.comparison.differ import CellChange, ChangeType
+
+        change = CellChange(
+            row="2025-01-01",
+            column="2330",
+            old_value=None,
+            new_value=np.nan,
+            change_type=ChangeType.NA_TYPE_CHANGED,
+        )
+
+        result = str(change)
+        assert "NA type changed" in result
+        assert "None" in result
+
+    def test_str_other_change_type(self):
+        """Verify string representation for other change types."""
+        from finlab_sentinel.comparison.differ import CellChange, ChangeType
+
+        change = CellChange(
+            row="2025-01-01",
+            column="2330",
+            old_value=100.0,
+            new_value=None,
+            change_type=ChangeType.ROW_ADDED,
+        )
+
+        result = str(change)
+        assert "row_added" in result
+
+
+class TestDtypeChange:
+    """Tests for DtypeChange dataclass."""
+
+    def test_str_representation(self):
+        """Verify string representation."""
+        from finlab_sentinel.comparison.differ import DtypeChange
+
+        change = DtypeChange(
+            column="price",
+            old_dtype="float64",
+            new_dtype="int64",
+        )
+
+        result = str(change)
+        assert "price" in result
+        assert "float64" in result
+        assert "int64" in result
+        assert "->" in result
+
+
+class TestGetNaType:
+    """Tests for _get_na_type helper function."""
+
+    def test_get_na_type_none(self):
+        """Verify None is identified correctly."""
+        from finlab_sentinel.comparison.differ import _get_na_type
+
+        assert _get_na_type(None) == "None"
+
+    def test_get_na_type_pd_na(self):
+        """Verify pd.NA is identified correctly."""
+        from finlab_sentinel.comparison.differ import _get_na_type
+
+        assert _get_na_type(pd.NA) == "pd.NA"
+
+    def test_get_na_type_np_nan(self):
+        """Verify np.nan is identified correctly."""
+        from finlab_sentinel.comparison.differ import _get_na_type
+
+        assert _get_na_type(np.nan) == "np.nan"
+
+    def test_get_na_type_not_na(self):
+        """Verify non-NA values return 'not_na'."""
+        from finlab_sentinel.comparison.differ import _get_na_type
+
+        assert _get_na_type(42) == "not_na"
+        assert _get_na_type("hello") == "not_na"
+        assert _get_na_type(3.14) == "not_na"

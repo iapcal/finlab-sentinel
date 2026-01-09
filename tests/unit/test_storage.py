@@ -258,3 +258,224 @@ class TestParquetStorage:
         # All remaining should be recent (new_hash*)
         for backup in remaining:
             assert backup.content_hash.startswith("new_hash")
+
+    def test_load_by_date(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
+        """Verify loading backup by specific date."""
+        parquet_storage.save("date_test", "test", sample_df, "hash1")
+
+        today = datetime.now()
+        result = parquet_storage.load_by_date("date_test", today)
+
+        assert result is not None
+        loaded_df, metadata = result
+        assert metadata.content_hash == "hash1"
+
+    def test_load_by_date_not_found(self, parquet_storage: ParquetStorage):
+        """Verify load_by_date returns None for nonexistent date."""
+        result = parquet_storage.load_by_date("nonexistent", datetime.now())
+        assert result is None
+
+    def test_load_missing_file_returns_none(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
+        """Verify loading returns None when file is missing but index exists."""
+        import os
+
+        parquet_storage.save("file_test", "test", sample_df, "hash1")
+
+        # Delete the actual file but keep index entry
+        metadata = parquet_storage.get_latest_metadata("file_test")
+        if metadata and metadata.file_path.exists():
+            os.remove(metadata.file_path)
+
+        result = parquet_storage.load_latest("file_test")
+        assert result is None
+
+    def test_delete_with_date(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
+        """Verify deleting backup by specific date."""
+        parquet_storage.save("delete_date_test", "test", sample_df, "hash1")
+        time.sleep(0.1)
+        parquet_storage.save("delete_date_test", "test", sample_df, "hash2")
+
+        today = datetime.now()
+        deleted = parquet_storage.delete("delete_date_test", today)
+
+        # Should have deleted at least one
+        assert deleted >= 1
+
+    def test_delete_cleans_empty_directory(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
+        """Verify delete removes empty directory."""
+        parquet_storage.save("empty_dir_test", "test", sample_df, "hash1")
+
+        backup_dir = parquet_storage._get_backup_dir("empty_dir_test")
+        assert backup_dir.exists()
+
+        parquet_storage.delete("empty_dir_test")
+
+        # Directory should be removed
+        assert not backup_dir.exists()
+
+    def test_get_unique_datasets(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
+        """Verify getting unique dataset list."""
+        parquet_storage.save("unique1", "dataset1", sample_df, "hash1")
+        parquet_storage.save("unique2", "dataset2", sample_df, "hash2")
+
+        datasets = parquet_storage.get_unique_datasets()
+
+        assert "unique1" in datasets
+        assert "unique2" in datasets
+
+    def test_accept_new_data_without_reason(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
+        """Verify accept_new_data works without reason."""
+        metadata = parquet_storage.accept_new_data(
+            backup_key="accepted_no_reason",
+            data=sample_df,
+            content_hash="new_hash",
+            dataset="test",
+            reason=None,
+        )
+
+        assert metadata is not None
+
+
+class TestGenerateUniverseHash:
+    """Tests for generate_universe_hash function."""
+
+    def test_generate_universe_hash(self):
+        """Verify universe hash generation."""
+        from finlab_sentinel.storage.parquet import generate_universe_hash
+
+        hash1 = generate_universe_hash("SP500")
+        hash2 = generate_universe_hash("SP500")
+        hash3 = generate_universe_hash("NASDAQ100")
+
+        assert hash1 == hash2
+        assert hash1 != hash3
+        assert len(hash1) == 8  # 8-character hash
+
+
+class TestBackupMetadata:
+    """Tests for BackupMetadata dataclass."""
+
+    def test_to_dict(self):
+        """Verify to_dict method."""
+        from pathlib import Path
+
+        from finlab_sentinel.storage.backend import BackupMetadata
+
+        metadata = BackupMetadata(
+            dataset="test:dataset",
+            backup_key="test__dataset",
+            content_hash="abc123",
+            created_at=datetime(2025, 1, 4, 10, 30),
+            row_count=100,
+            column_count=5,
+            file_path=Path("/tmp/test.parquet"),
+            file_size_bytes=1024,
+        )
+
+        result = metadata.to_dict()
+
+        assert result["dataset"] == "test:dataset"
+        assert result["backup_key"] == "test__dataset"
+        assert result["content_hash"] == "abc123"
+        assert result["row_count"] == 100
+        assert result["column_count"] == 5
+        assert result["file_size_bytes"] == 1024
+
+    def test_from_dict(self):
+        """Verify from_dict method."""
+        from finlab_sentinel.storage.backend import BackupMetadata
+
+        data = {
+            "dataset": "test:dataset",
+            "backup_key": "test__dataset",
+            "content_hash": "abc123",
+            "created_at": "2025-01-04T10:30:00",
+            "row_count": 100,
+            "column_count": 5,
+            "file_path": "/tmp/test.parquet",
+            "file_size_bytes": 1024,
+        }
+
+        metadata = BackupMetadata.from_dict(data)
+
+        assert metadata.dataset == "test:dataset"
+        assert metadata.backup_key == "test__dataset"
+        assert metadata.content_hash == "abc123"
+        assert metadata.row_count == 100
+        assert metadata.column_count == 5
+
+
+class TestBackupIndex:
+    """Tests for BackupIndex class."""
+
+    def test_get_unique_keys(self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame):
+        """Verify getting unique backup keys."""
+        parquet_storage.save("key1", "dataset1", sample_df, "hash1")
+        parquet_storage.save("key2", "dataset2", sample_df, "hash2")
+        parquet_storage.save("key1", "dataset1", sample_df, "hash3")
+
+        keys = parquet_storage.index.get_unique_keys()
+
+        assert "key1" in keys
+        assert "key2" in keys
+        assert len(keys) == 2
+
+    def test_get_by_date(self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame):
+        """Verify get_by_date returns correct backup."""
+        parquet_storage.save("bydate_test", "test", sample_df, "hash1")
+
+        today = datetime.now()
+        metadata = parquet_storage.index.get_by_date("bydate_test", today)
+
+        assert metadata is not None
+        assert metadata.content_hash == "hash1"
+
+    def test_get_by_date_not_found(self, parquet_storage: ParquetStorage):
+        """Verify get_by_date returns None for missing date."""
+        metadata = parquet_storage.index.get_by_date("nonexistent", datetime.now())
+        assert metadata is None
+
+    def test_delete_by_key_with_date(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
+        """Verify deleting by key and date."""
+        parquet_storage.save("delkey_test", "test", sample_df, "hash1")
+
+        today = datetime.now()
+        deleted = parquet_storage.index.delete_by_key("delkey_test", today)
+
+        assert len(deleted) >= 1
+
+    def test_delete_by_key_all(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
+        """Verify deleting all backups for a key."""
+        parquet_storage.save("delall_test", "test", sample_df, "hash1")
+        time.sleep(0.1)
+        parquet_storage.save("delall_test", "test", sample_df, "hash2")
+
+        deleted = parquet_storage.index.delete_by_key("delall_test", None)
+
+        assert len(deleted) == 2
+
+    def test_get_stats(self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame):
+        """Verify getting storage stats."""
+        parquet_storage.save("stats_test", "test", sample_df, "hash1")
+
+        stats = parquet_storage.index.get_stats()
+
+        assert stats["total_backups"] >= 1
+        assert stats["unique_datasets"] >= 1
+        assert stats["total_size_bytes"] >= 0
