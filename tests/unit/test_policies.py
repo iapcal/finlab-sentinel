@@ -335,7 +335,9 @@ class TestAppendOnlyPolicyViolationMessages:
         result = ComparisonResult(
             is_identical=False,
             na_type_changes=[
-                CellChange("row1", "col1", None, float("nan"), ChangeType.NA_TYPE_CHANGED)
+                CellChange(
+                    "row1", "col1", None, float("nan"), ChangeType.NA_TYPE_CHANGED
+                )
             ],
             na_type_changes_count=1,
             old_shape=(10, 4),
@@ -420,10 +422,7 @@ class TestCompositePolicy:
     def test_violation_when_any_policy_violated(self):
         """Verify violation occurs if any policy is violated."""
         # Threshold policy with low threshold
-        policy = CompositePolicy([
-            AppendOnlyPolicy(),
-            ThresholdPolicy(0.05)
-        ])
+        policy = CompositePolicy([AppendOnlyPolicy(), ThresholdPolicy(0.05)])
 
         # This violates append_only (deleted rows)
         result = ComparisonResult(
@@ -437,9 +436,11 @@ class TestCompositePolicy:
 
     def test_no_violation_when_all_policies_pass(self):
         """Verify no violation when all policies pass."""
-        policy = CompositePolicy([
-            PermissivePolicy(),  # Always passes
-        ])
+        policy = CompositePolicy(
+            [
+                PermissivePolicy(),  # Always passes
+            ]
+        )
 
         result = ComparisonResult(
             is_identical=False,
@@ -452,10 +453,12 @@ class TestCompositePolicy:
 
     def test_get_violation_message_combines_messages(self):
         """Verify violation message combines all violated policies."""
-        policy = CompositePolicy([
-            AppendOnlyPolicy(),
-            ThresholdPolicy(0.01)  # Very low threshold
-        ])
+        policy = CompositePolicy(
+            [
+                AppendOnlyPolicy(),
+                ThresholdPolicy(0.01),  # Very low threshold
+            ]
+        )
 
         # This violates both policies
         result = ComparisonResult(

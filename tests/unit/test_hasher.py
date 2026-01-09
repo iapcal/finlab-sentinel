@@ -127,10 +127,12 @@ class TestContentHasher:
         """Verify string/object columns are hashed correctly."""
         hasher = ContentHasher()
 
-        df = pd.DataFrame({
-            "str_col": ["apple", "banana", "cherry"],
-            "obj_col": [{"a": 1}, {"b": 2}, {"c": 3}],
-        })
+        df = pd.DataFrame(
+            {
+                "str_col": ["apple", "banana", "cherry"],
+                "obj_col": [{"a": 1}, {"b": 2}, {"c": 3}],
+            }
+        )
 
         hash1 = hasher.hash_dataframe(df)
 

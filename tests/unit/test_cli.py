@@ -433,7 +433,6 @@ class TestListCommandExtended:
         self, mock_config: SentinelConfig, sample_df: pd.DataFrame
     ):
         """Verify list filters out old backups."""
-        from datetime import datetime, timedelta
 
         storage = ParquetStorage(
             base_path=mock_config.get_storage_path(),

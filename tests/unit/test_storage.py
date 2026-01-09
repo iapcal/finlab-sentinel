@@ -420,7 +420,9 @@ class TestBackupMetadata:
 class TestBackupIndex:
     """Tests for BackupIndex class."""
 
-    def test_get_unique_keys(self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame):
+    def test_get_unique_keys(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
         """Verify getting unique backup keys."""
         parquet_storage.save("key1", "dataset1", sample_df, "hash1")
         parquet_storage.save("key2", "dataset2", sample_df, "hash2")
@@ -432,7 +434,9 @@ class TestBackupIndex:
         assert "key2" in keys
         assert len(keys) == 2
 
-    def test_get_by_date(self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame):
+    def test_get_by_date(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
         """Verify get_by_date returns correct backup."""
         parquet_storage.save("bydate_test", "test", sample_df, "hash1")
 

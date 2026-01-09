@@ -500,7 +500,6 @@ class TestUniverseHashDetection:
         """Verify universe hash is detected from _universe attribute."""
         import sys
         from types import ModuleType
-        from unittest.mock import patch
 
         config = SentinelConfig(
             storage=StorageConfig(path=tmp_path),
@@ -534,7 +533,9 @@ class TestUniverseHashDetection:
             if "finlab" in sys.modules:
                 del sys.modules["finlab"]
 
-    def test_no_universe_hash_when_not_set(self, config_for_interceptor: SentinelConfig):
+    def test_no_universe_hash_when_not_set(
+        self, config_for_interceptor: SentinelConfig
+    ):
         """Verify backup key doesn't include universe hash when not set."""
         mock_fn = MagicMock(return_value=pd.DataFrame({"a": [1, 2, 3]}))
         interceptor = DataInterceptor(mock_fn, config_for_interceptor)
