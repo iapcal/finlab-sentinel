@@ -41,3 +41,11 @@ class DataAnomalyError(SentinelError):
 
     def __str__(self) -> str:
         return f"Data anomaly detected: {self.report.summary}"
+
+
+class TimeTravelError(SentinelError):
+    """Base exception for time travel related errors."""
+
+
+class NoHistoricalDataError(TimeTravelError):
+    """Raised when no historical backup exists for time travel request."""

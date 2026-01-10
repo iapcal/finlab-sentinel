@@ -107,6 +107,23 @@ class StorageBackend(ABC):
         ...
 
     @abstractmethod
+    def load_at_time(
+        self,
+        backup_key: str,
+        target_time: datetime,
+    ) -> tuple[pd.DataFrame, BackupMetadata] | None:
+        """Load backup at or before specific datetime.
+
+        Args:
+            backup_key: The backup key
+            target_time: Target datetime to load backup from
+
+        Returns:
+            Tuple of (DataFrame, Metadata) or None if not found
+        """
+        ...
+
+    @abstractmethod
     def get_latest_metadata(self, backup_key: str) -> BackupMetadata | None:
         """Get metadata for most recent backup without loading data.
 

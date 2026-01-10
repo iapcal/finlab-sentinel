@@ -83,8 +83,8 @@ class ParquetStorage(StorageBackend):
 
     def _get_backup_file(self, backup_key: str, date: datetime) -> Path:
         """Get file path for a specific backup."""
-        # Use minute-level timestamp to avoid same-day overwrites
-        timestamp = date.strftime("%Y-%m-%dT%H-%M")
+        # Use second-level timestamp to avoid overwrites
+        timestamp = date.strftime("%Y-%m-%dT%H-%M-%S")
         return self._get_backup_dir(backup_key) / f"{timestamp}.parquet"
 
     def save(
@@ -156,6 +156,18 @@ class ParquetStorage(StorageBackend):
     ) -> tuple[pd.DataFrame, BackupMetadata] | None:
         """Load backup for specific date."""
         metadata = self.index.get_by_date(backup_key, date)
+        if metadata is None:
+            return None
+
+        return self._load_from_metadata(metadata)
+
+    def load_at_time(
+        self,
+        backup_key: str,
+        target_time: datetime,
+    ) -> tuple[pd.DataFrame, BackupMetadata] | None:
+        """Load backup at or before specific datetime."""
+        metadata = self.index.get_at_time(backup_key, target_time)
         if metadata is None:
             return None
 
