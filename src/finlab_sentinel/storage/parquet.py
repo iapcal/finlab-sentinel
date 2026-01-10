@@ -83,8 +83,8 @@ class ParquetStorage(StorageBackend):
 
     def _get_backup_file(self, backup_key: str, date: datetime) -> Path:
         """Get file path for a specific backup."""
-        # Use minute-level timestamp to avoid same-day overwrites
-        timestamp = date.strftime("%Y-%m-%dT%H-%M")
+        # Use second-level timestamp to avoid overwrites
+        timestamp = date.strftime("%Y-%m-%dT%H-%M-%S")
         return self._get_backup_dir(backup_key) / f"{timestamp}.parquet"
 
     def save(

@@ -108,7 +108,8 @@ def config_for_time_travel(tmp_path: Path) -> SentinelConfig:
     return SentinelConfig(
         storage=StorageConfig(path=tmp_path),
         comparison=ComparisonConfig(
-            policies=ComparisonPoliciesConfig(default_mode=PolicyMode.APPEND_ONLY)
+            policies=ComparisonPoliciesConfig(default_mode=PolicyMode.THRESHOLD),
+            change_threshold=1.0,  # Allow 100% change for tests
         ),
         anomaly=AnomalyConfig(behavior=AnomalyBehavior.RAISE),
     )
@@ -147,15 +148,31 @@ class TestDataInterceptorTimeTravel:
 
         # First call - save baseline
         first_result = interceptor("test:dataset")
-        first_call_time = datetime.now()
+        base_time = datetime.now() - timedelta(hours=2)
 
-        # Wait and make second call - save new data
-        time.sleep(0.2)
+        # Update first backup timestamp to 2 hours ago
+        with interceptor.storage.index._connect() as conn:
+            conn.execute(
+                "UPDATE backups SET created_at = ? WHERE backup_key = ?",
+                (base_time.isoformat(), "test__dataset"),
+            )
+
+        # Second call - save new data
+        time.sleep(1.0)
         _ = interceptor("test:dataset")
+        second_time = datetime.now() - timedelta(hours=1)
 
-        # Now activate time travel to first call time
+        # Update second backup timestamp to 1 hour ago
+        with interceptor.storage.index._connect() as conn:
+            conn.execute(
+                """UPDATE backups SET created_at = ?
+                   WHERE backup_key = ? AND created_at > ?""",
+                (second_time.isoformat(), "test__dataset", base_time.isoformat()),
+            )
+
+        # Now activate time travel to time between first and second backup
         ctx = TimeTravelContext.get_instance()
-        ctx.set_target_time(first_call_time + timedelta(seconds=0.1))
+        ctx.set_target_time(base_time + timedelta(minutes=30))
 
         # Third call should return first data (time travel)
         time_travel_result = interceptor("test:dataset")
@@ -253,7 +270,7 @@ class TestDataInterceptorTimeTravel:
         ctx.clear()
 
         # Call should now fetch fresh data
-        time.sleep(0.1)
+        time.sleep(1.0)
         normal_result = interceptor("test:dataset")
         assert normal_result.iloc[0, 0] == 2  # Second call to original function
 
@@ -347,16 +364,32 @@ class TestTimeTravelIntegration:
 
         # Step 1: Get initial data (creates backup)
         initial_data = interceptor("price:收盤價")
-        initial_time = datetime.now()
+        base_time = datetime.now() - timedelta(hours=2)
         assert initial_data["price"].tolist() == [100, 200, 300]
 
-        # Step 2: Wait and get new data
-        time.sleep(0.2)
+        # Update first backup timestamp to 2 hours ago
+        with interceptor.storage.index._connect() as conn:
+            conn.execute(
+                "UPDATE backups SET created_at = ? WHERE backup_key = ?",
+                (base_time.isoformat(), "price__收盤價"),
+            )
+
+        # Step 2: Get new data
+        time.sleep(1.0)
         new_data = interceptor("price:收盤價")
+        second_time = datetime.now() - timedelta(hours=1)
         assert new_data["price"].tolist() == [150, 250, 350]
 
+        # Update second backup timestamp to 1 hour ago
+        with interceptor.storage.index._connect() as conn:
+            conn.execute(
+                """UPDATE backups SET created_at = ?
+                   WHERE backup_key = ? AND created_at > ?""",
+                (second_time.isoformat(), "price__收盤價", base_time.isoformat()),
+            )
+
         # Step 3: Set time travel to initial time
-        finlab_sentinel.set_time_travel(initial_time + timedelta(seconds=0.1))
+        finlab_sentinel.set_time_travel(base_time + timedelta(minutes=30))
 
         # Verify status
         status = finlab_sentinel.get_time_travel_status()
@@ -370,7 +403,7 @@ class TestTimeTravelIntegration:
         finlab_sentinel.exit_time_travel()
 
         # Step 6: Get data again (should call original function)
-        time.sleep(0.1)
+        time.sleep(1.0)
         _ = interceptor("price:收盤價")
         # This should be the third call, but we accept new data
         # so it will be the latest data
@@ -411,30 +444,68 @@ class TestTimeTravelIntegration:
         )
         interceptor = DataInterceptor(mock_fn, config_for_time_travel)
 
+        base_time = datetime.now() - timedelta(hours=3)
+
         # Create 3 backups at different times
         _ = interceptor("test")
-        time1 = datetime.now()
-        time.sleep(0.2)
+        time.sleep(1.0)
+
+        # Update timestamps to be 3, 2, and 1 hours ago
+        with interceptor.storage.index._connect() as conn:
+            # Get all backups and update their timestamps
+            rows = conn.execute(
+                "SELECT id FROM backups WHERE backup_key = ? ORDER BY created_at ASC",
+                ("test",),
+            ).fetchall()
+            if len(rows) > 0:
+                conn.execute(
+                    "UPDATE backups SET created_at = ? WHERE id = ?",
+                    (base_time.isoformat(), rows[0]["id"]),
+                )
 
         _ = interceptor("test")
-        time2 = datetime.now()
-        time.sleep(0.2)
+        time.sleep(1.0)
+
+        with interceptor.storage.index._connect() as conn:
+            rows = conn.execute(
+                "SELECT id FROM backups WHERE backup_key = ? ORDER BY created_at ASC",
+                ("test",),
+            ).fetchall()
+            if len(rows) > 1:
+                conn.execute(
+                    "UPDATE backups SET created_at = ? WHERE id = ?",
+                    ((base_time + timedelta(hours=1)).isoformat(), rows[1]["id"]),
+                )
 
         _ = interceptor("test")
-        time3 = datetime.now()
+        time.sleep(1.0)
+
+        with interceptor.storage.index._connect() as conn:
+            rows = conn.execute(
+                "SELECT id FROM backups WHERE backup_key = ? ORDER BY created_at ASC",
+                ("test",),
+            ).fetchall()
+            if len(rows) > 2:
+                conn.execute(
+                    "UPDATE backups SET created_at = ? WHERE id = ?",
+                    ((base_time + timedelta(hours=2)).isoformat(), rows[2]["id"]),
+                )
 
         # Travel to time1
-        finlab_sentinel.set_time_travel(time1 + timedelta(seconds=0.05))
+        time1 = base_time + timedelta(minutes=30)
+        finlab_sentinel.set_time_travel(time1)
         result1 = interceptor("test")
         assert result1["value"].tolist() == [1]
 
         # Travel to time2
-        finlab_sentinel.set_time_travel(time2 + timedelta(seconds=0.05))
+        time2 = base_time + timedelta(hours=1, minutes=30)
+        finlab_sentinel.set_time_travel(time2)
         result2 = interceptor("test")
         assert result2["value"].tolist() == [2]
 
         # Travel to time3
-        finlab_sentinel.set_time_travel(time3 + timedelta(seconds=0.05))
+        time3 = base_time + timedelta(hours=2, minutes=30)
+        finlab_sentinel.set_time_travel(time3)
         result3 = interceptor("test")
         assert result3["value"].tolist() == [3]
 
