@@ -166,21 +166,21 @@ class TestParquetStorage:
         assert stats["total_backups"] >= 1
         assert stats["total_size_bytes"] > 0
 
-    def test_backup_file_uses_minute_timestamp(self, parquet_storage: ParquetStorage):
-        """Verify backup filename uses minute-level timestamp."""
+    def test_backup_file_uses_second_timestamp(self, parquet_storage: ParquetStorage):
+        """Verify backup filename uses second-level timestamp."""
         dt = datetime(2024, 1, 4, 9, 30, 45)
         path = parquet_storage._get_backup_file("test_key", dt)
-        assert path.name == "2024-01-04T09-30.parquet"
+        assert path.name == "2024-01-04T09-30-45.parquet"
 
     def test_backup_file_different_minutes(self, parquet_storage: ParquetStorage):
-        """Verify different minutes produce different filenames."""
+        """Verify different seconds produce different filenames."""
         dt1 = datetime(2024, 1, 4, 9, 30, 0)
         dt2 = datetime(2024, 1, 4, 9, 31, 0)
         path1 = parquet_storage._get_backup_file("test_key", dt1)
         path2 = parquet_storage._get_backup_file("test_key", dt2)
         assert path1.name != path2.name
-        assert path1.name == "2024-01-04T09-30.parquet"
-        assert path2.name == "2024-01-04T09-31.parquet"
+        assert path1.name == "2024-01-04T09-30-00.parquet"
+        assert path2.name == "2024-01-04T09-31-00.parquet"
 
     def test_multiple_backups_same_day(
         self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
@@ -189,7 +189,7 @@ class TestParquetStorage:
         # Save first backup
         parquet_storage.save("multi_test", "test", sample_df, "hash1")
         # Wait a bit to ensure different timestamp
-        time.sleep(0.1)
+        time.sleep(1.0)
         # Modify and save again
         modified_df = sample_df.copy()
         modified_df.iloc[0, 0] = 999.99
@@ -286,13 +286,15 @@ class TestParquetStorage:
         first_backup_time = datetime.now()
 
         # Wait a bit and save second backup
-        time.sleep(0.2)
+        time.sleep(1.0)
         modified_df = sample_df.copy()
         modified_df.iloc[0, 0] = 999.99
         parquet_storage.save("time_test", "test", modified_df, "hash2")
 
         # Load at time between the two backups
-        result = parquet_storage.load_at_time("time_test", first_backup_time + timedelta(seconds=0.1))
+        result = parquet_storage.load_at_time(
+            "time_test", first_backup_time + timedelta(seconds=0.5)
+        )
 
         assert result is not None
         loaded_df, metadata = result
@@ -362,7 +364,7 @@ class TestParquetStorage:
     ):
         """Verify deleting backup by specific date."""
         parquet_storage.save("delete_date_test", "test", sample_df, "hash1")
-        time.sleep(0.1)
+        time.sleep(1.0)
         parquet_storage.save("delete_date_test", "test", sample_df, "hash2")
 
         today = datetime.now()
@@ -559,7 +561,7 @@ class TestBackupIndex:
     ):
         """Verify deleting all backups for a key."""
         parquet_storage.save("delall_test", "test", sample_df, "hash1")
-        time.sleep(0.1)
+        time.sleep(1.0)
         parquet_storage.save("delall_test", "test", sample_df, "hash2")
 
         deleted = parquet_storage.index.delete_by_key("delall_test", None)
