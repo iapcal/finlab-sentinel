@@ -104,7 +104,7 @@ class ParquetStorage(StorageBackend):
         # Convert to PyArrow table with metadata
         table = pa.Table.from_pandas(data)
         metadata = {
-            b"sentinel_version": b"0.1.6",
+            b"sentinel_version": b"0.1.7",
             b"created_at": now.isoformat().encode(),
             b"content_hash": content_hash.encode(),
             b"dataset": dataset.encode(),
@@ -277,7 +277,7 @@ class ParquetStorage(StorageBackend):
         # Convert to PyArrow table with metadata
         table = pa.Table.from_pandas(data)
         metadata_dict = {
-            b"sentinel_version": b"0.1.3",
+            b"sentinel_version": b"0.1.7",
             b"created_at": now.isoformat().encode(),
             b"content_hash": content_hash.encode(),
             b"dataset": dataset.encode(),

@@ -29,6 +29,7 @@
 - **Preprocess Hook**: 比對前預處理（如四捨五入），支援萬用字元模式
 - **通知機制**: 支援自訂 callback（如 LINE、email 通知）
 - **CLI 工具**: 管理備份、查看差異、接受新資料
+- **時間旅行**: 回到歷史時間點取得當時的備份資料
 
 ## 安裝
 
@@ -192,6 +193,59 @@ finlab_sentinel.register_preprocess_hook("price:收盤價", lambda df: df.round(
 # "price:收盤價" 會使用 round(2)（精確匹配）
 # "price:開盤價" 會使用 round(1)（萬用字元匹配）
 ```
+
+## 時間旅行 (Time Travel)
+
+時間旅行功能讓你可以回到過去的某個時間點，取得當時備份的資料。這對於重現歷史回測結果、調查資料異動，或驗證策略在特定時間點的表現非常有用。
+
+### 基本用法
+
+```python
+import finlab_sentinel as fs
+from datetime import datetime
+
+# 啟用 sentinel
+fs.enable()
+
+# 設定時間旅行到指定時間點
+fs.set_time_travel(datetime(2024, 1, 5, 14, 30))
+
+# 現在 data.get() 會回傳該時間點的備份資料
+from finlab import data
+close = data.get("price:收盤價")  # 回傳 2024-01-05 14:30 的備份資料
+
+# 結束時間旅行，回到正常模式
+fs.exit_time_travel()
+```
+
+### 查詢狀態
+
+```python
+# 查詢目前時間旅行狀態
+status = fs.get_time_travel_status()
+print(status)
+# {'enabled': True, 'target_time': '2024-01-05T14:30:00'}
+```
+
+### 錯誤處理
+
+```python
+from finlab_sentinel import NoHistoricalDataError
+
+try:
+    fs.set_time_travel(datetime(2020, 1, 1))  # 很久以前
+    close = data.get("price:收盤價")
+except NoHistoricalDataError as e:
+    print(f"找不到該時間點的備份資料: {e}")
+finally:
+    fs.exit_time_travel()
+```
+
+### 使用情境
+
+- **重現歷史回測**: 確保使用與當時相同的資料進行回測
+- **調查資料異動**: 比對不同時間點的資料差異
+- **驗證策略表現**: 在特定歷史時間點驗證選股策略
 
 ## 自訂通知
 
