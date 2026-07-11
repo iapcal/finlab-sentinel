@@ -85,6 +85,12 @@ class AnomalyConfig(BaseModel):
         return self._callback_fn
 
 
+class AcceptConfig(BaseModel):
+    """Accept behavior configuration."""
+
+    create_patch: bool = True
+
+
 class LoggingConfig(BaseModel):
     """Logging configuration."""
 
@@ -114,6 +120,7 @@ class SentinelConfig(BaseModel):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     comparison: ComparisonConfig = Field(default_factory=ComparisonConfig)
     anomaly: AnomalyConfig = Field(default_factory=AnomalyConfig)
+    accept: AcceptConfig = Field(default_factory=AcceptConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     cli: CLIConfig = Field(default_factory=CLIConfig)
 

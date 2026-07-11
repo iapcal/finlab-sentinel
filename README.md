@@ -30,6 +30,7 @@
 - **通知機制**: 支援自訂 callback（如 LINE、email 通知）
 - **CLI 工具**: 管理備份、查看差異、接受新資料
 - **時間旅行**: 回到歷史時間點取得當時的備份資料
+- **永久 Patch**: accept 新資料時自動保存舊 baseline 快照，不受備份清理影響，隨時可查閱與匯出
 
 ## 安裝
 
@@ -102,6 +103,12 @@ sentinel accept "price:收盤價" --reason "確認資料修正"
 
 # 匯出備份
 sentinel export "price:收盤價" -o ./backup.parquet
+
+# 管理永久 patch（accept 時自動產生）
+sentinel patch list
+sentinel patch show <patch_id>
+sentinel patch export <patch_id> -o ./old_data.parquet
+sentinel patch delete <patch_id>
 ```
 
 ## 處理資料異常
@@ -246,6 +253,51 @@ finally:
 - **重現歷史回測**: 確保使用與當時相同的資料進行回測
 - **調查資料異動**: 比對不同時間點的資料差異
 - **驗證策略表現**: 在特定歷史時間點驗證選股策略
+
+## 永久 Patch
+
+當你 accept 新資料作為 baseline 時，sentinel 會自動建立一個**永久 patch**，保存 accept 前的舊 baseline 完整快照與 diff 摘要。Patch 存放在 `<storage.path>/patches/`，**不受滾動備份的 retention 清理影響**，之後可以隨時查閱、匯出舊資料。
+
+### CLI 用法
+
+```bash
+# 列出所有 patch（可用 --dataset 過濾）
+sentinel patch list
+
+# 查看 patch 詳情（含 diff 摘要）
+sentinel patch show "price__收盤價__2026-07-11T10-30-00"
+
+# 匯出 accept 前的舊資料
+sentinel patch export "price__收盤價__2026-07-11T10-30-00" -o ./old_data.parquet
+
+# 刪除 patch（需確認，或加 --force）
+sentinel patch delete "price__收盤價__2026-07-11T10-30-00"
+```
+
+### Python API
+
+```python
+import finlab_sentinel as fs
+
+# 列出 patch
+patches = fs.list_patches("price:收盤價")
+for p in patches:
+    print(p.patch_id, p.created_at, p.diff_summary["summary_text"])
+
+# 取回 accept 前的舊 baseline DataFrame
+old_close = fs.load_patch_data(patches[0].patch_id)
+```
+
+### 關閉自動建立
+
+在 `sentinel.toml` 中設定：
+
+```toml
+[accept]
+create_patch = false
+```
+
+注意：若 accept 時新資料與現有 baseline 完全相同（hash 一致），不會產生 patch；patch 建立失敗（如磁碟已滿）不會阻擋 accept 本身，只會記錄錯誤日誌。
 
 ## 自訂通知
 

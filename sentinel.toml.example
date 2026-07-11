@@ -64,6 +64,12 @@ reports_dir = "reports/"
 # Example: send LINE notification when anomaly detected
 # callback = "myproject.notifications:send_line_notification"
 
+[accept]
+# Create a permanent patch when accepting new data as baseline.
+# Patches preserve the old baseline snapshot + diff summary under
+# <storage.path>/patches/ and are never removed by retention cleanup.
+create_patch = true
+
 [logging]
 # Log level: DEBUG, INFO, WARNING, ERROR
 level = "INFO"

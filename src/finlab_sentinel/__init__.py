@@ -1,6 +1,7 @@
 """finlab-sentinel: Defensive monitoring layer for finlab data.get API."""
 
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from finlab_sentinel.core.hooks import (
     clear_preprocess_hooks,
@@ -12,11 +13,17 @@ from finlab_sentinel.core.time_travel import TimeTravelContext
 from finlab_sentinel.exceptions import (
     DataAnomalyError,
     NoHistoricalDataError,
+    PatchNotFoundError,
     SentinelError,
     TimeTravelError,
 )
 
-__version__ = "0.1.7"
+if TYPE_CHECKING:
+    import pandas as pd
+
+    from finlab_sentinel.storage.patches import PatchMetadata, PatchStore
+
+__version__ = "0.1.8"
 
 __all__ = [
     "__version__",
@@ -27,12 +34,15 @@ __all__ = [
     "DataAnomalyError",
     "TimeTravelError",
     "NoHistoricalDataError",
+    "PatchNotFoundError",
     "register_preprocess_hook",
     "unregister_preprocess_hook",
     "clear_preprocess_hooks",
     "set_time_travel",
     "exit_time_travel",
     "get_time_travel_status",
+    "list_patches",
+    "load_patch_data",
 ]
 
 
@@ -78,3 +88,51 @@ def get_time_travel_status() -> dict:
         "enabled": ctx.is_active(),
         "target_time": ctx.target_time.isoformat() if ctx.target_time else None,
     }
+
+
+def _get_patch_store() -> "PatchStore":
+    """Create PatchStore from the default configuration."""
+    from finlab_sentinel.config.loader import load_config
+    from finlab_sentinel.storage.patches import PatchStore
+
+    config = load_config()
+    return PatchStore(
+        base_path=config.get_storage_path(),
+        compression=config.storage.compression,
+    )
+
+
+def list_patches(dataset: str | None = None) -> "list[PatchMetadata]":
+    """List permanent patches created when accepting data.
+
+    Args:
+        dataset: Optional dataset name filter
+
+    Returns:
+        Patch metadata sorted by creation time (newest first)
+
+    Example:
+        >>> import finlab_sentinel as fs
+        >>> for p in fs.list_patches("price:收盤價"):
+        ...     print(p.patch_id, p.diff_summary["summary_text"])
+    """
+    return _get_patch_store().list_patches(dataset)
+
+
+def load_patch_data(patch_id: str) -> "pd.DataFrame":
+    """Load the old baseline DataFrame preserved by a patch.
+
+    Args:
+        patch_id: The patch identifier (see list_patches)
+
+    Returns:
+        The baseline DataFrame as it was before the accept
+
+    Raises:
+        PatchNotFoundError: If the patch does not exist
+
+    Example:
+        >>> import finlab_sentinel as fs
+        >>> old_close = fs.load_patch_data(fs.list_patches()[0].patch_id)
+    """
+    return _get_patch_store().load_old_data(patch_id)

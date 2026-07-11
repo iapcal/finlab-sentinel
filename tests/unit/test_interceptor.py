@@ -493,6 +493,135 @@ class TestAcceptCurrentData:
                 del sys.modules["finlab"]
 
 
+class TestAcceptCreatesPatch:
+    """Tests for permanent patch creation during accept."""
+
+    @staticmethod
+    def _setup_baseline_and_finlab(
+        config: SentinelConfig,
+        old_df: pd.DataFrame,
+        new_df: pd.DataFrame,
+    ):
+        """Save old_df as baseline and mock finlab returning new_df."""
+        import sys
+        from types import ModuleType
+
+        from finlab_sentinel.storage.parquet import ParquetStorage, sanitize_backup_key
+
+        storage = ParquetStorage(
+            base_path=config.get_storage_path(),
+            compression=config.storage.compression,
+        )
+        from finlab_sentinel.comparison.hasher import ContentHasher
+
+        old_hash = ContentHasher().hash_dataframe(old_df)
+        backup_key = sanitize_backup_key("test:dataset")
+        storage.save(backup_key, "test:dataset", old_df, old_hash)
+
+        mock_data = MagicMock()
+        mock_data.get = MagicMock(return_value=new_df)
+        mock_finlab = ModuleType("finlab")
+        mock_finlab.data = mock_data
+        sys.modules["finlab"] = mock_finlab
+
+    @staticmethod
+    def _teardown_finlab():
+        import sys
+
+        if "finlab" in sys.modules:
+            del sys.modules["finlab"]
+
+    def test_accept_creates_permanent_patch(
+        self, config_for_interceptor: SentinelConfig
+    ):
+        """Verify accepting data creates a patch preserving old baseline."""
+        from finlab_sentinel.storage.patches import PatchStore
+
+        old_df = pd.DataFrame({"a": [1, 2, 3]})
+        new_df = pd.DataFrame({"a": [4, 5, 6]})
+        self._setup_baseline_and_finlab(config_for_interceptor, old_df, new_df)
+
+        try:
+            result = accept_current_data(
+                "test:dataset", config_for_interceptor, "data revision"
+            )
+            assert result is True
+
+            patch_store = PatchStore(
+                base_path=config_for_interceptor.get_storage_path()
+            )
+            patches = patch_store.list_patches(dataset="test:dataset")
+            assert len(patches) == 1
+            assert patches[0].reason == "data revision"
+
+            preserved = patch_store.load_old_data(patches[0].patch_id)
+            pd.testing.assert_frame_equal(preserved, old_df)
+        finally:
+            self._teardown_finlab()
+
+    def test_accept_skips_patch_when_data_unchanged(
+        self, config_for_interceptor: SentinelConfig
+    ):
+        """Verify no patch is created when new data equals baseline."""
+        from finlab_sentinel.storage.patches import PatchStore
+
+        same_df = pd.DataFrame({"a": [1, 2, 3]})
+        self._setup_baseline_and_finlab(config_for_interceptor, same_df, same_df.copy())
+
+        try:
+            result = accept_current_data("test:dataset", config_for_interceptor)
+            assert result is True
+
+            patch_store = PatchStore(
+                base_path=config_for_interceptor.get_storage_path()
+            )
+            assert patch_store.list_patches() == []
+        finally:
+            self._teardown_finlab()
+
+    def test_accept_skips_patch_when_disabled(
+        self, config_for_interceptor: SentinelConfig
+    ):
+        """Verify no patch is created when accept.create_patch is False."""
+        from finlab_sentinel.storage.patches import PatchStore
+
+        config_for_interceptor.accept.create_patch = False
+        old_df = pd.DataFrame({"a": [1, 2, 3]})
+        new_df = pd.DataFrame({"a": [4, 5, 6]})
+        self._setup_baseline_and_finlab(config_for_interceptor, old_df, new_df)
+
+        try:
+            result = accept_current_data("test:dataset", config_for_interceptor)
+            assert result is True
+
+            patch_store = PatchStore(
+                base_path=config_for_interceptor.get_storage_path()
+            )
+            assert patch_store.list_patches() == []
+        finally:
+            self._teardown_finlab()
+
+    def test_accept_succeeds_when_patch_creation_fails(
+        self, config_for_interceptor: SentinelConfig
+    ):
+        """Verify accept proceeds even if patch creation raises."""
+        from unittest.mock import patch
+
+        old_df = pd.DataFrame({"a": [1, 2, 3]})
+        new_df = pd.DataFrame({"a": [4, 5, 6]})
+        self._setup_baseline_and_finlab(config_for_interceptor, old_df, new_df)
+
+        try:
+            with patch(
+                "finlab_sentinel.storage.patches.PatchStore.create",
+                side_effect=OSError("disk full"),
+            ):
+                result = accept_current_data("test:dataset", config_for_interceptor)
+            assert result is True
+        finally:
+            self._teardown_finlab()
+
+
 class TestUniverseHashDetection:
     """Tests for universe hash detection in interceptor."""
 

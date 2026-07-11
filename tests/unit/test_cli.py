@@ -852,3 +852,175 @@ class TestAcceptCommandExtended:
         assert "Accepted new data" in result.stdout
         # Reason should not be in output
         assert "Reason:" not in result.stdout
+
+
+@pytest.fixture
+def patch_store_with_patch(mock_config: SentinelConfig, sample_df: pd.DataFrame):
+    """Create a PatchStore containing one patch, return (store, metadata)."""
+    from finlab_sentinel.comparison.differ import DataFrameComparer
+    from finlab_sentinel.storage.patches import PatchStore
+
+    modified = sample_df.copy()
+    modified.iloc[0, 0] = 999.99
+
+    store = PatchStore(base_path=mock_config.get_storage_path())
+    result = DataFrameComparer().compare(sample_df, modified)
+    metadata = store.create(
+        dataset="price:收盤價",
+        backup_key="price__收盤價",
+        old_data=sample_df,
+        comparison_result=result,
+        old_hash="oldhash",
+        new_hash="newhash",
+        reason="data revision",
+    )
+    return store, metadata
+
+
+class TestPatchListCommand:
+    """Tests for patch list command."""
+
+    def test_list_empty(self, mock_config: SentinelConfig):
+        """Verify patch list with no patches."""
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
+            result = runner.invoke(app, ["patch", "list"])
+
+        assert result.exit_code == 0
+        assert "No patches found" in result.stdout
+
+    def test_list_shows_patches(
+        self, mock_config: SentinelConfig, patch_store_with_patch
+    ):
+        """Verify patch list shows existing patches."""
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
+            result = runner.invoke(app, ["patch", "list"])
+
+        assert result.exit_code == 0
+        assert "price:收盤價" in result.stdout
+
+    def test_list_filters_by_dataset(
+        self, mock_config: SentinelConfig, patch_store_with_patch
+    ):
+        """Verify patch list dataset filter."""
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
+            result = runner.invoke(app, ["patch", "list", "--dataset", "price:開盤價"])
+
+        assert result.exit_code == 0
+        assert "No patches found" in result.stdout
+
+
+class TestPatchShowCommand:
+    """Tests for patch show command."""
+
+    def test_show_patch(self, mock_config: SentinelConfig, patch_store_with_patch):
+        """Verify patch show displays metadata."""
+        _, metadata = patch_store_with_patch
+
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
+            result = runner.invoke(app, ["patch", "show", metadata.patch_id])
+
+        assert result.exit_code == 0
+        assert "price:收盤價" in result.stdout
+        assert "data revision" in result.stdout
+
+    def test_show_unknown_patch(self, mock_config: SentinelConfig):
+        """Verify patch show fails for unknown patch."""
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
+            result = runner.invoke(app, ["patch", "show", "nonexistent"])
+
+        assert result.exit_code == 1
+        assert "not found" in result.stdout.lower()
+
+
+class TestPatchExportCommand:
+    """Tests for patch export command."""
+
+    def test_export_old_data(
+        self,
+        mock_config: SentinelConfig,
+        patch_store_with_patch,
+        sample_df: pd.DataFrame,
+        tmp_path: Path,
+    ):
+        """Verify patch export writes old data parquet."""
+        _, metadata = patch_store_with_patch
+        output = tmp_path / "exported.parquet"
+
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
+            result = runner.invoke(
+                app, ["patch", "export", metadata.patch_id, "-o", str(output)]
+            )
+
+        assert result.exit_code == 0
+        assert output.exists()
+        exported = pd.read_parquet(output)
+        pd.testing.assert_frame_equal(exported, sample_df, check_freq=False)
+
+    def test_export_unknown_patch(self, mock_config: SentinelConfig, tmp_path: Path):
+        """Verify patch export fails for unknown patch."""
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
+            result = runner.invoke(
+                app,
+                ["patch", "export", "nonexistent", "-o", str(tmp_path / "x.parquet")],
+            )
+
+        assert result.exit_code == 1
+
+
+class TestPatchDeleteCommand:
+    """Tests for patch delete command."""
+
+    def test_delete_with_force(
+        self, mock_config: SentinelConfig, patch_store_with_patch
+    ):
+        """Verify patch delete removes the patch."""
+        store, metadata = patch_store_with_patch
+
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
+            result = runner.invoke(
+                app, ["patch", "delete", metadata.patch_id, "--force"]
+            )
+
+        assert result.exit_code == 0
+        assert store.list_patches() == []
+
+    def test_delete_prompts_without_force(
+        self, mock_config: SentinelConfig, patch_store_with_patch
+    ):
+        """Verify patch delete asks for confirmation and aborts on 'n'."""
+        store, metadata = patch_store_with_patch
+
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
+            result = runner.invoke(
+                app, ["patch", "delete", metadata.patch_id], input="n\n"
+            )
+
+        assert result.exit_code == 0
+        assert len(store.list_patches()) == 1
+
+    def test_delete_unknown_patch(self, mock_config: SentinelConfig):
+        """Verify patch delete fails for unknown patch."""
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
+            result = runner.invoke(app, ["patch", "delete", "nonexistent", "--force"])
+
+        assert result.exit_code == 1

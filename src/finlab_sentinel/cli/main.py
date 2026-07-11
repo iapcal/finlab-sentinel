@@ -282,6 +282,139 @@ def accept(
         raise typer.Exit(1)
 
 
+patch_app = typer.Typer(help="Manage permanent patches created when accepting data.")
+app.add_typer(patch_app, name="patch")
+
+
+def _get_patch_store():
+    """Create PatchStore from current config."""
+    from finlab_sentinel.config.loader import load_config
+    from finlab_sentinel.storage.patches import PatchStore
+
+    config = load_config(_config_path)
+    return PatchStore(
+        base_path=config.get_storage_path(),
+        compression=config.storage.compression,
+    )
+
+
+@patch_app.command("list")
+def patch_list(
+    dataset: str | None = typer.Option(
+        None,
+        "--dataset",
+        "-d",
+        help="Filter by dataset name",
+    ),
+) -> None:
+    """List permanent patches."""
+    store = _get_patch_store()
+    patches = store.list_patches(dataset)
+
+    if not patches:
+        console.print("[yellow]No patches found[/yellow]")
+        return
+
+    table = Table(title="Permanent Patches")
+    table.add_column("Patch ID", style="cyan")
+    table.add_column("Dataset", style="cyan")
+    table.add_column("Created At", style="green")
+    table.add_column("Reason")
+    table.add_column("Changes")
+
+    for p in patches:
+        table.add_row(
+            p.patch_id,
+            p.dataset,
+            p.created_at.strftime("%Y-%m-%d %H:%M"),
+            p.reason or "-",
+            p.diff_summary.get("summary_text", "-"),
+        )
+
+    console.print(table)
+
+
+@patch_app.command("show")
+def patch_show(
+    patch_id: str = typer.Argument(..., help="Patch ID to show"),
+) -> None:
+    """Show details of a permanent patch."""
+    from finlab_sentinel.exceptions import PatchNotFoundError
+
+    store = _get_patch_store()
+
+    try:
+        p = store.load_metadata(patch_id)
+    except PatchNotFoundError:
+        console.print(f"[red]Patch not found: {patch_id}[/red]")
+        raise typer.Exit(1) from None
+
+    console.print(f"[bold]Patch:[/bold] {p.patch_id}")
+    console.print(f"  Dataset: {p.dataset}")
+    console.print(f"  Created At: {p.created_at.isoformat()}")
+    console.print(f"  Reason: {p.reason or '-'}")
+    console.print(f"  Old Hash: {p.old_hash}")
+    console.print(f"  New Hash: {p.new_hash}")
+    console.print(f"  Old Shape: {p.old_shape[0]} rows x {p.old_shape[1]} columns")
+    console.print(f"  New Shape: {p.new_shape[0]} rows x {p.new_shape[1]} columns")
+    console.print("[bold]Diff Summary:[/bold]")
+    for key, value in p.diff_summary.items():
+        console.print(f"  {key}: {value}")
+
+
+@patch_app.command("export")
+def patch_export(
+    patch_id: str = typer.Argument(..., help="Patch ID to export"),
+    output: Path = typer.Option(
+        Path("."),
+        "--output",
+        "-o",
+        help="Output directory or file",
+    ),
+) -> None:
+    """Export the preserved old data of a patch."""
+    from finlab_sentinel.exceptions import PatchNotFoundError
+
+    store = _get_patch_store()
+
+    try:
+        df = store.load_old_data(patch_id)
+    except PatchNotFoundError:
+        console.print(f"[red]Patch not found: {patch_id}[/red]")
+        raise typer.Exit(1) from None
+
+    output_file = output / f"{patch_id}.parquet" if output.is_dir() else output
+
+    df.to_parquet(output_file)
+    console.print(f"[green]Exported to: {output_file}[/green]")
+
+
+@patch_app.command("delete")
+def patch_delete(
+    patch_id: str = typer.Argument(..., help="Patch ID to delete"),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Delete without confirmation",
+    ),
+) -> None:
+    """Delete a permanent patch."""
+    store = _get_patch_store()
+
+    if not force:
+        confirmed = typer.confirm(f"Permanently delete patch {patch_id}?")
+        if not confirmed:
+            console.print("[yellow]Aborted[/yellow]")
+            return
+
+    if store.delete(patch_id):
+        console.print(f"[green]Deleted patch: {patch_id}[/green]")
+    else:
+        console.print(f"[red]Patch not found: {patch_id}[/red]")
+        raise typer.Exit(1)
+
+
 @app.command("diff")
 def diff(
     dataset: str = typer.Argument(..., help="Dataset name to diff"),

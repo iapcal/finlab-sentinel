@@ -43,6 +43,10 @@ class DataAnomalyError(SentinelError):
         return f"Data anomaly detected: {self.report.summary}"
 
 
+class PatchNotFoundError(SentinelError):
+    """Raised when a requested patch does not exist."""
+
+
 class TimeTravelError(SentinelError):
     """Base exception for time travel related errors."""
 

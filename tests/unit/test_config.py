@@ -50,6 +50,7 @@ class TestSentinelConfig:
         assert config.comparison.rtol == 1e-5
         assert config.comparison.policies.default_mode == PolicyMode.APPEND_ONLY
         assert config.anomaly.behavior == AnomalyBehavior.RAISE
+        assert config.accept.create_patch is True
 
     def test_get_storage_path(self, tmp_path: Path):
         """Verify get_storage_path."""
@@ -106,6 +107,9 @@ rtol = 1e-6
 
 [anomaly]
 behavior = "warn_return_cached"
+
+[accept]
+create_patch = false
 """
         config_file = tmp_path / "sentinel.toml"
         config_file.write_text(config_content)
@@ -116,6 +120,7 @@ behavior = "warn_return_cached"
         assert config.storage.compression == "snappy"
         assert config.comparison.rtol == 1e-6
         assert config.anomaly.behavior == AnomalyBehavior.WARN_RETURN_CACHED
+        assert config.accept.create_patch is False
 
     def test_load_nonexistent_raises(self, tmp_path: Path):
         """Verify error when explicit file doesn't exist."""

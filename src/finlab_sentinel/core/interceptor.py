@@ -300,6 +300,8 @@ def accept_current_data(
         logger.warning(f"No backup found for {dataset}")
         return False
 
+    cached_data, cached_metadata = cached
+
     # Re-fetch current data
     try:
         from finlab import data as finlab_data
@@ -321,6 +323,40 @@ def accept_current_data(
     # Compute hash and save as accepted
     hasher = ContentHasher()
     new_hash = hasher.hash_dataframe(new_data)
+
+    # Create permanent patch preserving old baseline before it's superseded.
+    # Patch failure must not block the accept itself.
+    if config.accept.create_patch and new_hash != cached_metadata.content_hash:
+        try:
+            from finlab_sentinel.storage.patches import PatchStore
+
+            comparer = DataFrameComparer(
+                rtol=config.comparison.rtol,
+                atol=config.comparison.atol,
+                check_dtype=config.comparison.check_dtype,
+                check_na_type=config.comparison.check_na_type,
+            )
+            result = comparer.compare(cached_data, new_data)
+
+            patch_store = PatchStore(
+                base_path=config.get_storage_path(),
+                compression=config.storage.compression,
+            )
+            patch_metadata = patch_store.create(
+                dataset=dataset,
+                backup_key=backup_key,
+                old_data=cached_data,
+                comparison_result=result,
+                old_hash=cached_metadata.content_hash,
+                new_hash=new_hash,
+                reason=reason,
+            )
+            logger.info(f"Permanent patch created: {patch_metadata.patch_id}")
+        except Exception as e:
+            logger.error(
+                f"Failed to create permanent patch for {dataset}: {e}. "
+                f"Accept will proceed without a patch."
+            )
 
     storage.accept_new_data(
         backup_key=backup_key,
