@@ -89,7 +89,10 @@ ignore = [
 "tests/*" = ["ARG001", "ARG005", "E501", "E731", "B017", "SIM117"]  # Relax rules for test files
 
 [tool.mypy]
-python_version = "3.10"
+# python_version intentionally unpinned: numpy 2.5+ stubs use PEP 695 `type`
+# statements which mypy rejects when targeting < 3.12. Type checking follows
+# the dev interpreter (3.12); runtime 3.10 compat is covered by ruff
+# (target-version py310) and the CI test matrix.
 warn_return_any = false
 warn_unused_ignores = true
 strict = false

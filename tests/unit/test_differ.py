@@ -83,11 +83,14 @@ class TestDataFrameComparer:
         comparer = DataFrameComparer(check_na_type=True)
 
         dates = pd.date_range("2025-01-01", periods=3)
-        # Use object dtype to preserve actual NA types
-        old_arr = pd.array([np.nan, "b", "c"], dtype=object)
-        new_arr = pd.array([pd.NA, "b", "c"], dtype=object)
-        old_df = pd.DataFrame({"col": old_arr}, index=dates)
-        new_df = pd.DataFrame({"col": new_arr}, index=dates)
+        # Build columns as explicit object-dtype Series to preserve actual NA
+        # types (pandas 3.0 infers the str dtype otherwise, normalizing NAs)
+        old_df = pd.DataFrame(
+            {"col": pd.Series([np.nan, "b", "c"], index=dates, dtype=object)}
+        )
+        new_df = pd.DataFrame(
+            {"col": pd.Series([pd.NA, "b", "c"], index=dates, dtype=object)}
+        )
 
         result = comparer.compare(old_df, new_df)
 

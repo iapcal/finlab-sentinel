@@ -136,8 +136,9 @@ class ContentHasher:
                     arr = np.where(nan_mask, 0.0, arr)
             buf.write(arr.tobytes())
         elif pd.api.types.is_datetime64_any_dtype(series.dtype):
-            # Datetime: use int64 representation
-            arr = series.view("int64").to_numpy()
+            # Datetime: use int64 epoch representation
+            # (Series.view was removed in pandas 3.0)
+            arr = series.astype("int64").to_numpy()
             buf.write(arr.tobytes())
         else:
             # Object/string: use string representation
