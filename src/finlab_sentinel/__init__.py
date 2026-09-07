@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
     from finlab_sentinel.storage.patches import PatchMetadata, PatchStore
 
-__version__ = "0.1.8"
+__version__ = "0.1.9"
 
 __all__ = [
     "__version__",

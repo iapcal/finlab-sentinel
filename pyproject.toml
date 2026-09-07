@@ -1,6 +1,6 @@
 [project]
 name = "finlab-sentinel"
-version = "0.1.8"
+version = "0.1.9"
 description = "Defensive monitoring layer for finlab data.get API - detect unexpected data changes"
 readme = "README.md"
 license = { text = "MIT" }
@@ -57,7 +57,7 @@ Repository = "https://github.com/iapcal/finlab-sentinel"
 Issues = "https://github.com/iapcal/finlab-sentinel/issues"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling<1.32"]  # 1.32 emits Metadata-Version 2.5, which twine rejects
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
