@@ -540,3 +540,63 @@ class TestAppendOnlyPolicyWithNaToValue:
         )
 
         assert policy.is_violation(result)
+
+
+class TestViolationMessageWithTruncatedSamples:
+    """Counts exceed the collected sample lists past MAX_CELL_CHANGES."""
+
+    def test_reports_modified_count_without_samples(self):
+        """Large modifications leave modified_cells empty but must be reported."""
+        policy = AppendOnlyPolicy()
+
+        result = ComparisonResult(
+            is_identical=False,
+            modified_cells=[],
+            modified_cells_count=5000,
+            old_shape=(1000, 10),
+            new_shape=(1000, 10),
+        )
+
+        message = policy.get_violation_message(result)
+
+        assert "5000 cells modified" in message
+        assert "Examples" not in message
+        assert message != "Append-only policy violation: No violations"
+
+    def test_reports_na_type_count_beyond_sample_cap(self):
+        """NA type change count is reported, not the capped sample length."""
+        policy = AppendOnlyPolicy()
+
+        result = ComparisonResult(
+            is_identical=False,
+            na_type_changes=[
+                CellChange(f"row{i}", "col1", None, None, ChangeType.NA_TYPE_CHANGED)
+                for i in range(10)
+            ],
+            na_type_changes_count=250,
+            old_shape=(1000, 10),
+            new_shape=(1000, 10),
+        )
+
+        message = policy.get_violation_message(result)
+
+        assert "250 NA type changes detected" in message
+
+    def test_still_shows_examples_for_small_modifications(self):
+        """Small modifications keep their examples in the message."""
+        policy = AppendOnlyPolicy()
+
+        result = ComparisonResult(
+            is_identical=False,
+            modified_cells=[
+                CellChange("row1", "col1", 1.0, 2.0, ChangeType.VALUE_MODIFIED),
+            ],
+            modified_cells_count=1,
+            old_shape=(10, 4),
+            new_shape=(10, 4),
+        )
+
+        message = policy.get_violation_message(result)
+
+        assert "1 cells modified" in message
+        assert "Examples" in message

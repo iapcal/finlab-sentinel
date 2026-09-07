@@ -320,9 +320,14 @@ def accept_current_data(
         logger.error(f"Failed to fetch current data for {dataset}: {e}")
         return False
 
-    # Compute hash and save as accepted
+    # Compute hash and save as accepted.
+    # The stored content_hash is always over preprocessed data (see __call__),
+    # so accept must use the same domain or the hash fast-path breaks.
+    preprocess_registry = get_preprocess_registry()
+    new_data_for_comparison = preprocess_registry.apply(dataset, new_data)
+
     hasher = ContentHasher()
-    new_hash = hasher.hash_dataframe(new_data)
+    new_hash = hasher.hash_dataframe(new_data_for_comparison)
 
     # Create permanent patch preserving old baseline before it's superseded.
     # Patch failure must not block the accept itself.
@@ -336,7 +341,8 @@ def accept_current_data(
                 check_dtype=config.comparison.check_dtype,
                 check_na_type=config.comparison.check_na_type,
             )
-            result = comparer.compare(cached_data, new_data)
+            cached_for_comparison = preprocess_registry.apply(dataset, cached_data)
+            result = comparer.compare(cached_for_comparison, new_data_for_comparison)
 
             patch_store = PatchStore(
                 base_path=config.get_storage_path(),

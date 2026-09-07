@@ -507,12 +507,14 @@ def diff(
     if result.deleted_columns:
         console.print(f"[red]- {len(result.deleted_columns)} columns deleted[/red]")
 
-    if result.modified_cells:
-        console.print(f"[yellow]~ {len(result.modified_cells)} cells modified[/yellow]")
-        for change in result.modified_cells[:5]:
+    modified = max(result.modified_cells_count, len(result.modified_cells))
+    if modified:
+        console.print(f"[yellow]~ {modified} cells modified[/yellow]")
+        shown = result.modified_cells[:5]
+        for change in shown:
             console.print(f"    {change}")
-        if len(result.modified_cells) > 5:
-            console.print(f"    ... and {len(result.modified_cells) - 5} more")
+        if modified > len(shown):
+            console.print(f"    ... and {modified - len(shown)} more")
 
     if result.dtype_changes:
         console.print(f"[yellow]~ {len(result.dtype_changes)} dtype changes[/yellow]")

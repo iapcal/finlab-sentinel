@@ -759,3 +759,127 @@ class TestHashMismatchButIdentical:
         # Should return data without error
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 3
+
+
+class TestAcceptCurrentDataWithPreprocessHook:
+    """accept_current_data must hash and compare in the preprocessed domain."""
+
+    def setup_method(self):
+        from finlab_sentinel.core.hooks import clear_preprocess_hooks
+
+        clear_preprocess_hooks()
+
+    def teardown_method(self):
+        import sys
+
+        from finlab_sentinel.core.hooks import clear_preprocess_hooks
+
+        clear_preprocess_hooks()
+        if "finlab" in sys.modules:
+            del sys.modules["finlab"]
+
+    @staticmethod
+    def _mock_finlab(new_df: pd.DataFrame) -> None:
+        import sys
+        from types import ModuleType
+
+        mock_data = MagicMock()
+        mock_data.get = MagicMock(return_value=new_df)
+        mock_finlab = ModuleType("finlab")
+        mock_finlab.data = mock_data
+        sys.modules["finlab"] = mock_finlab
+
+    def test_accepted_hash_matches_interceptor_hash_domain(
+        self, config_for_interceptor: SentinelConfig
+    ):
+        """Stored hash after accept must be over preprocessed data."""
+        from finlab_sentinel.comparison.hasher import ContentHasher
+        from finlab_sentinel.core.hooks import register_preprocess_hook
+        from finlab_sentinel.storage.parquet import ParquetStorage, sanitize_backup_key
+
+        register_preprocess_hook("test:dataset", lambda df: df.round(2))
+
+        old_df = pd.DataFrame({"a": [1.111, 2.222]})
+        new_df = pd.DataFrame({"a": [1.114, 2.224]})
+
+        storage = ParquetStorage(
+            base_path=config_for_interceptor.get_storage_path(),
+            compression=config_for_interceptor.storage.compression,
+        )
+        backup_key = sanitize_backup_key("test:dataset")
+        hasher = ContentHasher()
+        # Baseline hash is over preprocessed data, matching DataInterceptor
+        old_hash = hasher.hash_dataframe(old_df.round(2))
+        storage.save(backup_key, "test:dataset", old_df, old_hash)
+
+        self._mock_finlab(new_df)
+
+        assert accept_current_data("test:dataset", config_for_interceptor) is True
+
+        _, metadata = storage.load_latest(backup_key)
+        assert metadata.content_hash == hasher.hash_dataframe(new_df.round(2))
+        # Hook makes old and new identical, so the hash must be unchanged
+        assert metadata.content_hash == old_hash
+
+    def test_no_patch_when_hook_makes_data_identical(
+        self, config_for_interceptor: SentinelConfig
+    ):
+        """Changes the hook normalizes away must not create a patch."""
+        from finlab_sentinel.comparison.hasher import ContentHasher
+        from finlab_sentinel.core.hooks import register_preprocess_hook
+        from finlab_sentinel.storage.parquet import ParquetStorage, sanitize_backup_key
+        from finlab_sentinel.storage.patches import PatchStore
+
+        register_preprocess_hook("test:dataset", lambda df: df.round(2))
+
+        old_df = pd.DataFrame({"a": [1.111, 2.222]})
+        new_df = pd.DataFrame({"a": [1.114, 2.224]})
+
+        storage = ParquetStorage(
+            base_path=config_for_interceptor.get_storage_path(),
+            compression=config_for_interceptor.storage.compression,
+        )
+        backup_key = sanitize_backup_key("test:dataset")
+        storage.save(
+            backup_key,
+            "test:dataset",
+            old_df,
+            ContentHasher().hash_dataframe(old_df.round(2)),
+        )
+
+        self._mock_finlab(new_df)
+
+        assert accept_current_data("test:dataset", config_for_interceptor) is True
+
+        patch_store = PatchStore(base_path=config_for_interceptor.get_storage_path())
+        assert patch_store.list_patches(dataset="test:dataset") == []
+
+    def test_stored_data_stays_raw(self, config_for_interceptor: SentinelConfig):
+        """Accept stores raw data, not the preprocessed form."""
+        from finlab_sentinel.comparison.hasher import ContentHasher
+        from finlab_sentinel.core.hooks import register_preprocess_hook
+        from finlab_sentinel.storage.parquet import ParquetStorage, sanitize_backup_key
+
+        register_preprocess_hook("test:dataset", lambda df: df.round(2))
+
+        old_df = pd.DataFrame({"a": [1.111, 2.222]})
+        new_df = pd.DataFrame({"a": [9.876, 8.765]})
+
+        storage = ParquetStorage(
+            base_path=config_for_interceptor.get_storage_path(),
+            compression=config_for_interceptor.storage.compression,
+        )
+        backup_key = sanitize_backup_key("test:dataset")
+        storage.save(
+            backup_key,
+            "test:dataset",
+            old_df,
+            ContentHasher().hash_dataframe(old_df.round(2)),
+        )
+
+        self._mock_finlab(new_df)
+
+        assert accept_current_data("test:dataset", config_for_interceptor) is True
+
+        stored, _ = storage.load_latest(backup_key)
+        pd.testing.assert_frame_equal(stored, new_df)

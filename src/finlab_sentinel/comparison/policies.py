@@ -83,19 +83,23 @@ class AppendOnlyPolicy(ComparisonPolicy):
                 else f"Deleted columns: {list(result.deleted_columns)}"
             )
 
-        if result.modified_cells:
+        # Counts may exceed the collected sample lists (MAX_CELL_CHANGES cap),
+        # so report the count and only show examples when we have any.
+        modified = max(result.modified_cells_count, len(result.modified_cells))
+        if modified:
+            message = f"{modified} cells modified."
             sample = result.modified_cells[:3]
-            violations.append(
-                f"{len(result.modified_cells)} cells modified. "
-                f"Examples: {[str(c) for c in sample]}"
-            )
+            if sample:
+                message += f" Examples: {[str(c) for c in sample]}"
+            violations.append(message)
 
         if result.dtype_changes:
             changes = [str(c) for c in result.dtype_changes[:3]]
             violations.append(f"Dtype changes: {changes}")
 
-        if result.na_type_changes:
-            violations.append(f"{len(result.na_type_changes)} NA type changes detected")
+        na_changes = max(result.na_type_changes_count, len(result.na_type_changes))
+        if na_changes:
+            violations.append(f"{na_changes} NA type changes detected")
 
         return (
             f"Append-only policy violation: {'; '.join(violations)}"
