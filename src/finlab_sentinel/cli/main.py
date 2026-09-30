@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 import typer
 from rich.console import Console
@@ -439,54 +440,77 @@ def patch_restore(
         False,
         "--yes",
         "-y",
+        "--force",
+        "-f",
         help="Restore without confirmation",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Print the result as one line of JSON (needs --yes or --dry-run)",
     ),
 ) -> None:
     """Restore a patch's preserved data as the dataset's baseline.
 
     The replaced baseline is saved as a new patch, so the restore can itself
-    be restored. The source patch is kept.
+    be restored. The source patch is kept. Do not restore a dataset while a
+    sentinel-enabled process may be using it.
     """
     from finlab_sentinel.config.loader import load_config
     from finlab_sentinel.exceptions import PatchNotFoundError, PatchRestoreError
     from finlab_sentinel.storage.patches import restore_patch
+
+    if json_output and not (yes or dry_run):
+        raise typer.BadParameter(
+            "--json needs --yes or --dry-run (it never prompts)",
+            param_hint="--json",
+        )
 
     config = load_config(_config_path)
 
     try:
         preview = restore_patch(patch_id, config, reason=reason, dry_run=True)
     except PatchNotFoundError:
-        console.print(f"[red]Patch not found: {patch_id}[/red]")
-        raise typer.Exit(1) from None
+        _restore_failed(patch_id, f"Patch not found: {patch_id}", json_output)
     except PatchRestoreError as e:
-        console.print(f"[red]Cannot restore patch: {e}[/red]")
-        raise typer.Exit(1) from None
+        _restore_failed(patch_id, f"Cannot restore patch: {e}", json_output)
 
-    _print_restore_preview(preview)
-
-    if preview.already_current:
-        console.print(
-            "[green]Baseline already matches the patch; nothing to do[/green]"
-        )
+    if json_output and (dry_run or preview.already_current):
+        _echo_json(preview.to_dict())
         return
 
-    if dry_run:
-        console.print("[yellow]Dry run - nothing changed[/yellow]")
-        return
+    if not json_output:
+        _print_restore_preview(preview)
 
-    if not yes:
-        confirmed = typer.confirm(
-            f"Restore baseline of {preview.patch.dataset} from patch {patch_id}?"
-        )
-        if not confirmed:
-            console.print("[yellow]Aborted[/yellow]")
+        if preview.already_current:
+            console.print(
+                "[green]Baseline already matches the patch; nothing to do[/green]"
+            )
             return
 
+        if dry_run:
+            console.print("[yellow]Dry run - nothing changed[/yellow]")
+            return
+
+        if not yes:
+            confirmed = typer.confirm(
+                f"Restore baseline of {preview.patch.dataset} from patch {patch_id}?"
+            )
+            if not confirmed:
+                console.print("[yellow]Aborted[/yellow]")
+                return
+
+    # Replace exactly the baseline that was previewed (and confirmed)
     try:
-        result = restore_patch(patch_id, config, reason=reason)
+        result = restore_patch(
+            patch_id, config, reason=reason, expected_latest=preview.latest
+        )
     except (PatchNotFoundError, PatchRestoreError) as e:
-        console.print(f"[red]Failed to restore patch: {e}[/red]")
-        raise typer.Exit(1) from None
+        _restore_failed(patch_id, f"Failed to restore patch: {e}", json_output)
+
+    if json_output:
+        _echo_json(result.to_dict())
+        return
 
     if not result.changed:
         console.print(
@@ -503,10 +527,26 @@ def patch_restore(
         console.print("  No previous baseline to preserve")
 
 
+def _echo_json(data: dict) -> None:
+    """Print JSON as a single plain line (never wrapped by Rich)."""
+    typer.echo(json.dumps(data))
+
+
+def _restore_failed(patch_id: str, message: str, json_output: bool) -> NoReturn:
+    """Report a failed restore and exit with status 1."""
+    if json_output:
+        _echo_json({"patch_id": patch_id, "changed": False, "error": message})
+    else:
+        console.print(f"[red]{message}[/red]")
+    raise typer.Exit(1)
+
+
 def _print_restore_preview(preview: RestoreResult) -> None:
     """Print the current baseline next to the patch data to be restored."""
     p = preview.patch
-    prev = preview.previous
+    # The latest entry is shown even when its file is missing
+    current = preview.previous or preview.latest
+    missing = " (file missing)" if preview.baseline_file_missing else ""
 
     console.print(f"[bold]Restore patch:[/bold] {p.patch_id}")
     console.print(f"  Dataset: {p.dataset}")
@@ -518,22 +558,27 @@ def _print_restore_preview(preview: RestoreResult) -> None:
     table.add_column("Patch Data", style="green")
     table.add_row(
         "Content Hash",
-        prev.content_hash if prev else "-",
+        current.content_hash if current else "-",
         p.old_hash,
     )
     table.add_row(
         "Created At",
-        prev.created_at.strftime("%Y-%m-%d %H:%M:%S") if prev else "-",
+        current.created_at.strftime("%Y-%m-%d %H:%M:%S") + missing if current else "-",
         p.created_at.strftime("%Y-%m-%d %H:%M:%S") + " (patch)",
     )
     table.add_row(
         "Shape",
-        f"{prev.row_count} x {prev.column_count}" if prev else "-",
+        f"{current.row_count} x {current.column_count}" if current else "-",
         f"{p.old_shape[0]} x {p.old_shape[1]}",
     )
     console.print(table)
 
-    if prev is None:
+    if preview.baseline_file_missing and preview.latest is not None:
+        console.print(
+            f"  Current baseline file is missing ({preview.latest.file_path}); "
+            f"the patch data will replace it"
+        )
+    elif current is None:
         console.print("  Dataset has no baseline; the patch data will become it")
     elif not preview.already_current:
         console.print("  Current baseline will be saved as a new patch first")

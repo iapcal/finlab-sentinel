@@ -1222,3 +1222,114 @@ class TestPatchRestoreCommand:
 
         assert result.exit_code == 0
         assert "Restored From" in result.stdout
+
+    def test_restore_json_with_yes(
+        self, mock_config: SentinelConfig, accepted_with_patch
+    ):
+        """Verify --json prints one unwrapped JSON line with the result."""
+        import json
+
+        storage, store, metadata = accepted_with_patch
+
+        result = self._invoke(mock_config, [metadata.patch_id, "--yes", "--json"])
+
+        assert result.exit_code == 0
+        assert len(result.stdout.strip().splitlines()) == 1
+        data = json.loads(result.stdout)
+        assert data["patch_id"] == metadata.patch_id
+        assert data["changed"] is True
+        assert data["restored_hash"] == "oldhash"
+        assert data["previous"]["content_hash"] == "newhash"
+        assert storage.get_latest_metadata("price__收盤價").content_hash == "oldhash"
+        # The new patch id comes through intact (no wrapping) and is real
+        new_patch = store.load_metadata(data["new_patch_id"])
+        assert new_patch.restored_from == metadata.patch_id
+
+    def test_restore_json_dry_run(
+        self, mock_config: SentinelConfig, accepted_with_patch
+    ):
+        """Verify --json --dry-run reports the plan and writes nothing."""
+        import json
+
+        storage, store, metadata = accepted_with_patch
+
+        result = self._invoke(mock_config, [metadata.patch_id, "--dry-run", "--json"])
+
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)
+        assert data["dry_run"] is True
+        assert data["changed"] is False
+        assert data["latest"]["content_hash"] == "newhash"
+        assert storage.get_latest_metadata("price__收盤價").content_hash == "newhash"
+        assert len(store.list_patches()) == 1
+
+    def test_restore_json_needs_yes_or_dry_run(
+        self, mock_config: SentinelConfig, accepted_with_patch
+    ):
+        """Verify --json refuses to prompt."""
+        storage, _, metadata = accepted_with_patch
+
+        result = self._invoke(mock_config, [metadata.patch_id, "--json"])
+
+        assert result.exit_code == 2
+        assert storage.get_latest_metadata("price__收盤價").content_hash == "newhash"
+
+    def test_restore_json_not_found(self, mock_config: SentinelConfig):
+        """Verify --json reports errors as JSON with exit code 1."""
+        import json
+
+        result = self._invoke(mock_config, ["nonexistent", "--yes", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.stdout)
+        assert data == {
+            "patch_id": "nonexistent",
+            "changed": False,
+            "error": "Patch not found: nonexistent",
+        }
+
+    @pytest.mark.parametrize("flag", ["--force", "-f", "-y"])
+    def test_restore_force_aliases(
+        self, mock_config: SentinelConfig, accepted_with_patch, flag
+    ):
+        """Verify --force/-f skip the confirmation like --yes."""
+        storage, _, metadata = accepted_with_patch
+
+        result = self._invoke(mock_config, [metadata.patch_id, flag])
+
+        assert result.exit_code == 0
+        assert storage.get_latest_metadata("price__收盤價").content_hash == "oldhash"
+
+    def test_restore_preview_reports_missing_file(
+        self, mock_config: SentinelConfig, accepted_with_patch
+    ):
+        """Verify the preview says so when the baseline file is missing."""
+        storage, _, metadata = accepted_with_patch
+        storage.get_latest_metadata("price__收盤價").file_path.unlink()
+
+        result = self._invoke(mock_config, [metadata.patch_id, "--dry-run"])
+
+        assert result.exit_code == 0
+        assert "Current baseline file is missing" in result.stdout
+        assert "has no baseline" not in result.stdout
+
+    def test_restore_aborts_if_baseline_changed_after_preview(
+        self, mock_config: SentinelConfig, accepted_with_patch, sample_df, monkeypatch
+    ):
+        """Verify the confirmed restore replaces only the previewed baseline."""
+        storage, store, metadata = accepted_with_patch
+
+        def confirm_while_data_get_saves(*args, **kwargs):
+            # data.get saves a new baseline while the user reads the preview
+            storage.save("price__收盤價", "price:收盤價", sample_df, "saved-meanwhile")
+            return True
+
+        monkeypatch.setattr("typer.confirm", confirm_while_data_get_saves)
+
+        result = self._invoke(mock_config, [metadata.patch_id])
+
+        assert result.exit_code == 1
+        assert "changed since it was read" in result.stdout
+        latest = storage.get_latest_metadata("price__收盤價")
+        assert latest.content_hash == "saved-meanwhile"
+        assert len(store.list_patches()) == 1

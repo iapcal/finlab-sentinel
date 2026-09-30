@@ -302,9 +302,14 @@ old_close = fs.load_patch_data(patches[0].patch_id)
 # 先預覽：列出目前 baseline 與 patch 資料的 hash、時間、大小，不寫入任何東西
 sentinel patch restore "price__收盤價__2026-07-11T10-30-00" --dry-run
 
-# 還原（需確認，或加 --yes / -y 略過；--reason 記錄原因）
+# 還原（需確認，或加 --yes / -y（同 --force / -f）略過；--reason 記錄原因）
 sentinel patch restore "price__收盤價__2026-07-11T10-30-00" --reason "撤銷誤判的 accept"
+
+# 給程式呼叫：--json 輸出單行 JSON（需搭配 --yes 或 --dry-run，不會詢問）
+sentinel patch restore "price__收盤價__2026-07-11T10-30-00" --yes --json
 ```
+
+確認時只會取代預覽中看到的那個 baseline：若預覽之後 baseline 又被更新，還原會中止（回傳 1），不做任何變更。
 
 ```python
 import finlab_sentinel as fs
@@ -314,8 +319,10 @@ result.changed       # baseline 是否被取代
 result.new_patch_id  # 被取代的 baseline 另存成的新 patch；還原它即可撤銷這次還原
 result.to_dict()     # 可序列化成 JSON 的結果摘要
 
-# 只預覽（不寫入）：result.previous 是目前的 baseline，result.patch 是要還原的 patch
+# 只預覽（不寫入）：preview.previous 是目前的 baseline，preview.patch 是要還原的 patch
 preview = fs.restore_patch("price__收盤價__2026-07-11T10-30-00", dry_run=True)
+# 確認後還原；預覽之後 baseline 若有變動則拋出 PatchRestoreError、不做任何變更
+fs.restore_patch("price__收盤價__2026-07-11T10-30-00", expected_latest=preview.latest)
 ```
 
 - **還原本身也可以再還原**：被取代的 baseline 會先另存成一個新 patch（reason 預設為 `restore of <patch_id>`，`patch show` 會顯示 `Restored From`），之後 restore 這個新 patch 就能回到還原前。
