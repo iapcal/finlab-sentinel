@@ -309,3 +309,75 @@ class TestPatchMetadataRestoredFrom:
         del data["restored_from"]
 
         assert PatchMetadata.from_dict(data).restored_from is None
+
+
+class TestPatchStoreCreateRobustness:
+    """create() keeps the data even when the diff summary is unavailable."""
+
+    def test_failing_summary_falls_back_and_leaves_no_empty_dir(
+        self, patch_store, sample_df, tmp_storage
+    ) -> None:
+        class BrokenResult:
+            new_shape = (10, 4)
+
+            def summary(self):
+                raise RuntimeError("boom")
+
+        created = patch_store.create(
+            dataset="price:收盤價",
+            backup_key="price__收盤價",
+            old_data=sample_df,
+            comparison_result=BrokenResult(),
+            old_hash="a",
+            new_hash="b",
+        )
+
+        assert created.diff_summary == {
+            "summary_text": "diff unavailable: RuntimeError: boom"
+        }
+        pd.testing.assert_frame_equal(
+            patch_store.load_old_data(created.patch_id), sample_df, check_freq=False
+        )
+        assert [p.name for p in (tmp_storage / "patches").iterdir()] == [
+            created.patch_id
+        ]
+
+    def test_create_without_comparison_result(self, patch_store, sample_df) -> None:
+        created = patch_store.create(
+            dataset="price:收盤價",
+            backup_key="price__收盤價",
+            old_data=sample_df,
+            comparison_result=None,
+            old_hash="a",
+            new_hash="b",
+            new_shape=(3, 2),
+            diff_error="IndexError: out of bounds",
+        )
+
+        loaded = patch_store.load_metadata(created.patch_id)
+        assert loaded.new_shape == (3, 2)
+        assert loaded.diff_summary["summary_text"] == (
+            "diff unavailable: IndexError: out of bounds"
+        )
+
+    def test_create_requires_new_shape_without_comparison(
+        self, patch_store, sample_df, tmp_storage
+    ) -> None:
+        with pytest.raises(ValueError, match="new_shape"):
+            patch_store.create(
+                dataset="price:收盤價",
+                backup_key="price__收盤價",
+                old_data=sample_df,
+                comparison_result=None,
+                old_hash="a",
+                new_hash="b",
+            )
+        assert not (tmp_storage / "patches").exists()
+
+    def test_absolute_patch_id_outside_patches_is_invalid(
+        self, patch_store, tmp_storage
+    ) -> None:
+        with pytest.raises(PatchNotFoundError, match="Invalid patch id"):
+            patch_store.load_metadata(str(tmp_storage / "data"))
+        assert patch_store.delete(str(tmp_storage)) is False
+        assert tmp_storage.exists()

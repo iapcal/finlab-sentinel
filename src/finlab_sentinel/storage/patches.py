@@ -27,11 +27,18 @@ from finlab_sentinel.comparison.differ import ComparisonResult, DataFrameCompare
 from finlab_sentinel.comparison.hasher import ContentHasher
 from finlab_sentinel.core.hooks import get_registry as get_preprocess_registry
 from finlab_sentinel.exceptions import PatchNotFoundError, PatchRestoreError
-from finlab_sentinel.storage.parquet import ParquetStorage, get_index_path
+from finlab_sentinel.storage.backend import UNSET, BackupMetadata, _Unset
+from finlab_sentinel.storage.parquet import (
+    ParquetStorage,
+    _fsync_dir,
+    _fsync_file,
+    get_index_path,
+    is_direct_child,
+    is_valid_backup_key,
+)
 
 if TYPE_CHECKING:
     from finlab_sentinel.config.schema import SentinelConfig
-    from finlab_sentinel.storage.backend import BackupMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -126,15 +133,12 @@ class PatchStore:
         self.compression = compression if compression != "none" else None
 
     def _get_patch_dir(self, patch_id: str) -> Path:
-        # Patch ids are single path components; reject anything that could
+        patch_dir = self.patches_path / patch_id
+        # Patch ids are single path components; reject anything that would
         # resolve outside the patches directory (e.g. "..", "../data").
-        if (
-            not patch_id
-            or patch_id in (".", "..")
-            or any(sep in patch_id for sep in ("/", "\\", ":"))
-        ):
+        if not is_direct_child(patch_dir, self.patches_path):
             raise PatchNotFoundError(f"Invalid patch id: {patch_id!r}")
-        return self.patches_path / patch_id
+        return patch_dir
 
     def _allocate_patch_dir(self, backup_key: str, now: datetime) -> tuple[str, Path]:
         """Create a new, empty patch directory.
@@ -166,54 +170,78 @@ class PatchStore:
         dataset: str,
         backup_key: str,
         old_data: pd.DataFrame,
-        comparison_result: ComparisonResult,
+        comparison_result: ComparisonResult | None,
         old_hash: str,
         new_hash: str,
         reason: str | None = None,
         restored_from: str | None = None,
+        new_shape: tuple[int, int] | None = None,
+        diff_error: str | None = None,
     ) -> PatchMetadata:
         """Create a permanent patch preserving the old baseline.
+
+        The patch files are flushed to disk before this returns, so the
+        baseline replaced next stays recoverable even after a crash.
 
         Args:
             dataset: Original dataset name
             backup_key: Sanitized backup key
             old_data: The baseline DataFrame being replaced
-            comparison_result: Comparison between old and new data
+            comparison_result: Comparison between old and new data, or None
+                if it could not be computed (pass ``new_shape`` then)
             old_hash: Content hash of old data
             new_hash: Content hash of new data
             reason: Optional reason given when accepting
             restored_from: Patch being restored, when the old baseline is
                 replaced by a restore rather than an accept
+            new_shape: Shape of the new data, used without a comparison result
+            diff_error: Why the comparison failed, recorded in the summary
 
         Returns:
             Metadata for the created patch
         """
+        # A summary that cannot be built must not stop the data being kept
+        diff_summary: dict | None = None
+        if comparison_result is not None:
+            new_shape = comparison_result.new_shape
+            try:
+                diff_summary = _build_diff_summary(comparison_result)
+            except Exception as e:
+                diff_error = f"{type(e).__name__}: {e}"
+        if diff_summary is None:
+            diff_summary = {"summary_text": f"diff unavailable: {diff_error}"}
+        if new_shape is None:
+            raise ValueError("new_shape is required without a comparison result")
+
         now = datetime.now()
         patch_id, patch_dir = self._allocate_patch_dir(backup_key, now)
-
-        metadata = PatchMetadata(
-            patch_id=patch_id,
-            dataset=dataset,
-            backup_key=backup_key,
-            created_at=now,
-            reason=reason,
-            old_hash=old_hash,
-            new_hash=new_hash,
-            old_shape=(len(old_data), len(old_data.columns)),
-            new_shape=comparison_result.new_shape,
-            diff_summary=_build_diff_summary(comparison_result),
-            restored_from=restored_from,
-        )
 
         # Write parquet first, json last: patch.json presence marks a
         # complete patch, so readers skip interrupted writes.
         try:
-            old_data.to_parquet(patch_dir / OLD_DATA_NAME, compression=self.compression)
+            metadata = PatchMetadata(
+                patch_id=patch_id,
+                dataset=dataset,
+                backup_key=backup_key,
+                created_at=now,
+                reason=reason,
+                old_hash=old_hash,
+                new_hash=new_hash,
+                old_shape=(len(old_data), len(old_data.columns)),
+                new_shape=new_shape,
+                diff_summary=diff_summary,
+                restored_from=restored_from,
+            )
+            data_path = patch_dir / OLD_DATA_NAME
+            old_data.to_parquet(data_path, compression=self.compression)
+            _fsync_file(data_path)
             json_path = patch_dir / PATCH_JSON_NAME
             json_path.write_text(
                 json.dumps(metadata.to_dict(), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            _fsync_file(json_path)
+            _fsync_dir(self.patches_path)
         except Exception:
             shutil.rmtree(patch_dir, ignore_errors=True)
             raise
@@ -328,6 +356,9 @@ class RestoreResult:
         previous: The dataset's baseline before the restore (the one that
             was, or for a dry run would be, replaced), or None if the dataset
             had no usable baseline
+        latest: The latest index entry the restore was planned against;
+            equals ``previous`` unless that entry's file is missing. Pass it
+            as ``expected_latest`` to restore only if nothing changed since
         baseline: The new baseline written by the restore; None for a dry
             run or when the baseline already matched the patch
         new_patch: Patch preserving ``previous`` so the restore can itself be
@@ -340,6 +371,7 @@ class RestoreResult:
 
     patch: PatchMetadata
     previous: BackupMetadata | None
+    latest: BackupMetadata | None
     baseline: BackupMetadata | None
     new_patch: PatchMetadata | None
     already_current: bool
@@ -355,6 +387,11 @@ class RestoreResult:
         """ID of the patch preserving the replaced baseline, if one was made."""
         return self.new_patch.patch_id if self.new_patch is not None else None
 
+    @property
+    def baseline_file_missing(self) -> bool:
+        """Whether the latest index entry exists but its file is gone."""
+        return self.previous is None and self.latest is not None
+
     def to_dict(self) -> dict:
         """Convert to a JSON-serializable dictionary."""
         return {
@@ -366,9 +403,76 @@ class RestoreResult:
             "already_current": self.already_current,
             "changed": self.changed,
             "previous": self.previous.to_dict() if self.previous else None,
+            "latest": self.latest.to_dict() if self.latest else None,
             "baseline": self.baseline.to_dict() if self.baseline else None,
             "new_patch_id": self.new_patch_id,
         }
+
+
+def preserve_baseline(
+    patch_store: PatchStore,
+    config: SentinelConfig,
+    dataset: str,
+    backup_key: str,
+    old_data: pd.DataFrame,
+    new_data: pd.DataFrame,
+    old_hash: str,
+    new_hash: str,
+    reason: str | None = None,
+    restored_from: str | None = None,
+) -> PatchMetadata:
+    """Save a baseline that is about to be replaced as a permanent patch.
+
+    The diff summary compares the way DataInterceptor does, after preprocess
+    hooks (which get copies, so ``old_data`` is written untouched). If the
+    comparison fails, e.g. on a duplicate index, the patch is still created
+    with a placeholder summary: keeping the data matters more than the diff.
+
+    Args:
+        patch_store: Store to create the patch in
+        config: Configuration (comparison tolerances)
+        dataset: Dataset name
+        backup_key: Backup key of the dataset
+        old_data: The baseline being replaced
+        new_data: The data replacing it
+        old_hash: Content hash of the baseline being replaced
+        new_hash: Content hash of the replacing data
+        reason: Reason recorded on the patch
+        restored_from: Patch being restored, when a restore replaces it
+
+    Returns:
+        Metadata of the created patch
+    """
+    registry = get_preprocess_registry()
+    comparer = DataFrameComparer(
+        rtol=config.comparison.rtol,
+        atol=config.comparison.atol,
+        check_dtype=config.comparison.check_dtype,
+        check_na_type=config.comparison.check_na_type,
+    )
+    result: ComparisonResult | None = None
+    diff_error: str | None = None
+    try:
+        result = comparer.compare(
+            registry.apply(dataset, old_data.copy()),
+            registry.apply(dataset, new_data.copy()),
+        )
+    except Exception as e:
+        diff_error = f"{type(e).__name__}: {e}"
+        logger.warning(f"Could not diff {dataset} for its patch: {diff_error}")
+
+    return patch_store.create(
+        dataset=dataset,
+        backup_key=backup_key,
+        old_data=old_data,
+        comparison_result=result,
+        old_hash=old_hash,
+        new_hash=new_hash,
+        reason=reason,
+        restored_from=restored_from,
+        new_shape=(len(new_data), len(new_data.columns)),
+        diff_error=diff_error,
+    )
 
 
 def restore_patch(
@@ -376,6 +480,7 @@ def restore_patch(
     config: SentinelConfig | None = None,
     reason: str | None = None,
     dry_run: bool = False,
+    expected_latest: BackupMetadata | None | _Unset = UNSET,
 ) -> RestoreResult:
     """Make the baseline preserved by a patch the dataset's baseline again.
 
@@ -408,6 +513,8 @@ def restore_patch(
         reason: Reason recorded on the new patch and the restored baseline
             (default: "restore of <patch_id>")
         dry_run: Only report what would change, without writing anything
+        expected_latest: If given (typically ``latest`` from a dry run),
+            abort unless the dataset's latest backup is still this entry
 
     Returns:
         RestoreResult describing the previous and restored baselines
@@ -436,6 +543,10 @@ def restore_patch(
     except Exception as e:
         raise PatchRestoreError(f"Cannot read patch {patch_id}: {e}") from e
 
+    if not is_valid_backup_key(patch.backup_key):
+        raise PatchRestoreError(
+            f"Patch {patch_id} has an invalid backup key: {patch.backup_key!r}"
+        )
     shape = (len(patch_data), len(patch_data.columns))
     if shape != tuple(patch.old_shape):
         raise PatchRestoreError(
@@ -446,12 +557,22 @@ def restore_patch(
     # A dry run must not create an index for a storage that has none
     storage: ParquetStorage | None = None
     latest: BackupMetadata | None = None
-    if not dry_run or get_index_path(storage_path).exists():
-        storage = ParquetStorage(
-            base_path=storage_path,
-            compression=config.storage.compression,
+    try:
+        if not dry_run or get_index_path(storage_path).exists():
+            storage = ParquetStorage(
+                base_path=storage_path,
+                compression=config.storage.compression,
+            )
+            latest = storage.get_latest_metadata(patch.backup_key)
+    except Exception as e:
+        raise PatchRestoreError(
+            f"Cannot read the backup index in {storage_path}: {e}"
+        ) from e
+
+    if expected_latest is not UNSET and latest != expected_latest:
+        raise PatchRestoreError(
+            f"Baseline of {patch.dataset} changed since it was read; nothing restored"
         )
-        latest = storage.get_latest_metadata(patch.backup_key)
 
     previous: BackupMetadata | None = None
     previous_data: pd.DataFrame | None = None
@@ -472,6 +593,7 @@ def restore_patch(
         else:
             previous = latest
 
+    # Same hash is not enough: a preprocess hook can hide raw differences
     hasher = ContentHasher()
     already_current = (
         previous is not None
@@ -486,6 +608,7 @@ def restore_patch(
         return RestoreResult(
             patch=patch,
             previous=previous,
+            latest=latest,
             baseline=None,
             new_patch=None,
             already_current=already_current,
@@ -499,14 +622,17 @@ def restore_patch(
     new_patch: PatchMetadata | None = None
     if previous is not None and previous_data is not None:
         try:
-            new_patch = _preserve_baseline(
+            new_patch = preserve_baseline(
                 patch_store,
                 config,
-                patch,
-                patch_data,
-                previous,
-                previous_data,
-                effective_reason,
+                dataset=patch.dataset,
+                backup_key=patch.backup_key,
+                old_data=previous_data,
+                new_data=patch_data,
+                old_hash=previous.content_hash,
+                new_hash=patch.old_hash,
+                reason=effective_reason,
+                restored_from=patch_id,
             )
         except Exception as e:
             raise PatchRestoreError(
@@ -544,44 +670,9 @@ def restore_patch(
     return RestoreResult(
         patch=patch,
         previous=previous,
+        latest=latest,
         baseline=baseline,
         new_patch=new_patch,
         already_current=False,
         dry_run=False,
-    )
-
-
-def _preserve_baseline(
-    patch_store: PatchStore,
-    config: SentinelConfig,
-    patch: PatchMetadata,
-    patch_data: pd.DataFrame,
-    previous: BackupMetadata,
-    previous_data: pd.DataFrame,
-    reason: str,
-) -> PatchMetadata:
-    """Save the baseline a restore is about to replace as a new patch."""
-    # Diff in the same (preprocessed) domain as accept_current_data. Hooks get
-    # copies so the frames written to disk stay untouched.
-    registry = get_preprocess_registry()
-    comparer = DataFrameComparer(
-        rtol=config.comparison.rtol,
-        atol=config.comparison.atol,
-        check_dtype=config.comparison.check_dtype,
-        check_na_type=config.comparison.check_na_type,
-    )
-    result = comparer.compare(
-        registry.apply(patch.dataset, previous_data.copy()),
-        registry.apply(patch.dataset, patch_data.copy()),
-    )
-
-    return patch_store.create(
-        dataset=patch.dataset,
-        backup_key=patch.backup_key,
-        old_data=previous_data,
-        comparison_result=result,
-        old_hash=previous.content_hash,
-        new_hash=patch.old_hash,
-        reason=reason,
-        restored_from=patch.patch_id,
     )

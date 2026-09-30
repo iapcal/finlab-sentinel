@@ -700,3 +700,177 @@ class TestConcurrentWrites:
 
         assert state["competing"] == "database is locked"
         assert _storage(config).get_latest_metadata(KEY) == result.baseline
+
+
+class TestRestoreHardening:
+    """Guards around reading, diffing and swapping during a restore."""
+
+    @staticmethod
+    def _patch_over_baseline(
+        config, current: pd.DataFrame, current_hash: str, patch_data: pd.DataFrame
+    ) -> PatchMetadata:
+        """Baseline ``current`` plus a patch preserving ``patch_data``."""
+        _storage(config).save(KEY, DATASET, current, current_hash)
+        return _patch_store(config).create(
+            dataset=DATASET,
+            backup_key=KEY,
+            old_data=patch_data,
+            comparison_result=None,
+            old_hash="patch-hash",
+            new_hash=current_hash,
+            new_shape=(len(current), len(current.columns)),
+        )
+
+    def test_same_hash_different_data_is_restored(self, config):
+        """A matching content hash alone does not make the restore a no-op."""
+        patch_data = _price_frame()
+        current = patch_data * 2  # e.g. normalized away by a preprocess hook
+        patch_meta = self._patch_over_baseline(config, current, "h", patch_data)
+        patch_meta = replace_old_hash(config, patch_meta, "h")
+
+        result = restore_patch(patch_meta.patch_id, config)
+
+        assert not result.already_current
+        assert result.changed
+        restored = _storage(config).load_backup(result.baseline)
+        pd.testing.assert_frame_equal(restored, patch_data, check_freq=False)
+
+    def test_diff_failure_still_preserves_baseline(self, config):
+        """A baseline the differ cannot compare is still kept as a patch."""
+        dates = pd.DatetimeIndex(
+            ["2026-09-01", "2026-09-01", "2026-09-02", "2026-09-03"], name="date"
+        )
+        patch_data = pd.DataFrame(
+            {"stock_id": ["2330", "2317", "2330", "2330"], "v": [1.0, 2.0, 3.0, 4.0]},
+            index=dates,
+        )
+        current = patch_data.assign(v=[1.0, 2.0, 3.0, 9.0])
+        with pytest.raises(IndexError):  # the duplicate index trips the differ
+            DataFrameComparer().compare(current, patch_data)
+        patch_meta = self._patch_over_baseline(config, current, "current", patch_data)
+
+        result = restore_patch(patch_meta.patch_id, config)
+
+        assert result.new_patch is not None
+        summary = result.new_patch.diff_summary["summary_text"]
+        assert summary.startswith("diff unavailable: IndexError")
+        preserved = _patch_store(config).load_old_data(result.new_patch_id)
+        pd.testing.assert_frame_equal(preserved, current, check_freq=False)
+        restored = _storage(config).load_backup(result.baseline)
+        pd.testing.assert_frame_equal(restored, patch_data, check_freq=False)
+
+    @pytest.mark.parametrize("dry_run", [False, True])
+    def test_index_errors_are_wrapped(
+        self, config, finlab_frames, monkeypatch, dry_run
+    ):
+        """A locked or broken index surfaces as PatchRestoreError."""
+        patch_meta = _baseline_then_accept(config, finlab_frames, _price_frame())
+        root = config.get_storage_path()
+        before = _snapshot(root)
+        monkeypatch.setattr(
+            ParquetStorage,
+            "get_latest_metadata",
+            _raise(sqlite3.OperationalError("database is locked")),
+        )
+
+        with pytest.raises(PatchRestoreError, match="database is locked"):
+            restore_patch(patch_meta.patch_id, config, dry_run=dry_run)
+
+        assert _snapshot(root) == before
+
+    def test_expected_latest_guards_against_changes_since_preview(
+        self, config, finlab_frames
+    ):
+        """expected_latest from a dry run aborts if the baseline moved on."""
+        original = _price_frame()
+        patch_meta = _baseline_then_accept(config, finlab_frames, original)
+        preview = restore_patch(patch_meta.patch_id, config, dry_run=True)
+        assert preview.latest == preview.previous
+
+        _storage(config).save(KEY, DATASET, original, "saved-after-preview")
+        with pytest.raises(PatchRestoreError, match="changed since it was read"):
+            restore_patch(patch_meta.patch_id, config, expected_latest=preview.latest)
+        assert (
+            _storage(config).get_latest_metadata(KEY).content_hash
+            == "saved-after-preview"
+        )
+
+        preview = restore_patch(patch_meta.patch_id, config, dry_run=True)
+        result = restore_patch(
+            patch_meta.patch_id, config, expected_latest=preview.latest
+        )
+        assert result.baseline.content_hash == patch_meta.old_hash
+
+    def test_invalid_backup_key_in_patch_is_refused(self, config, finlab_frames):
+        """A tampered backup key never becomes a path outside the storage."""
+        patch_meta = _baseline_then_accept(config, finlab_frames, _price_frame())
+        json_path = (
+            config.get_storage_path() / "patches" / patch_meta.patch_id / "patch.json"
+        )
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        data["backup_key"] = "../../escaped"
+        json_path.write_text(json.dumps(data), encoding="utf-8")
+        root = config.get_storage_path()
+        before = _snapshot(root)
+
+        with pytest.raises(PatchRestoreError, match="invalid backup key"):
+            restore_patch(patch_meta.patch_id, config)
+
+        assert _snapshot(root) == before
+
+    def test_patch_files_are_flushed_before_the_swap(
+        self, config, finlab_frames, monkeypatch
+    ):
+        """The patch preserving the replaced baseline is durable first."""
+        import finlab_sentinel.storage.patches as patches_module
+
+        patch_meta = _baseline_then_accept(config, finlab_frames, _price_frame())
+        flushed: list[Path] = []
+        real_fsync_file = patches_module._fsync_file
+        real_restore_baseline = ParquetStorage.restore_baseline
+        order: list[str] = []
+
+        def recording_fsync(path):
+            flushed.append(Path(path))
+            real_fsync_file(path)
+
+        def recording_restore_baseline(self, *args, **kwargs):
+            order.append("swap")
+            return real_restore_baseline(self, *args, **kwargs)
+
+        monkeypatch.setattr(patches_module, "_fsync_file", recording_fsync)
+        monkeypatch.setattr(
+            ParquetStorage, "restore_baseline", recording_restore_baseline
+        )
+        monkeypatch.setattr(
+            PatchStore,
+            "create",
+            _record_then(PatchStore.create, lambda: order.append("patch")),
+        )
+
+        result = restore_patch(patch_meta.patch_id, config)
+
+        patch_dir = config.get_storage_path() / "patches" / result.new_patch_id
+        assert {patch_dir / "old_data.parquet", patch_dir / "patch.json"} <= set(
+            flushed
+        )
+        assert order == ["patch", "swap"]
+
+
+def replace_old_hash(config, patch_meta: PatchMetadata, old_hash: str):
+    """Rewrite a patch's recorded old_hash (to build a hash collision)."""
+    json_path = config.get_storage_path() / "patches" / patch_meta.patch_id
+    json_path = json_path / "patch.json"
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    data["old_hash"] = old_hash
+    json_path.write_text(json.dumps(data), encoding="utf-8")
+    return _patch_store(config).load_metadata(patch_meta.patch_id)
+
+
+def _record_then(func, record):
+    def wrapper(*args, **kwargs):
+        result = func(*args, **kwargs)
+        record()
+        return result
+
+    return wrapper

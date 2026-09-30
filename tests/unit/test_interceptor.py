@@ -971,3 +971,55 @@ class TestBaselineWriteRaces:
         assert storage.get_latest_metadata(backup_key).content_hash == "concurrent"
         patch_store = PatchStore(base_path=config_for_interceptor.get_storage_path())
         assert patch_store.list_patches() == []
+
+
+class TestAcceptPatchWhenDiffFails:
+    """Accept keeps the replaced baseline even if it cannot be diffed."""
+
+    def test_accept_creates_patch_despite_diff_failure(
+        self, config_for_interceptor: SentinelConfig
+    ):
+        import sys
+        from types import ModuleType
+
+        from finlab_sentinel.comparison.hasher import ContentHasher
+        from finlab_sentinel.storage.parquet import ParquetStorage, sanitize_backup_key
+        from finlab_sentinel.storage.patches import PatchStore
+
+        dates = pd.DatetimeIndex(
+            ["2026-09-01", "2026-09-01", "2026-09-02", "2026-09-03"], name="date"
+        )
+        old_df = pd.DataFrame(
+            {"stock_id": ["2330", "2317", "2330", "2330"], "v": [1.0, 2.0, 3.0, 4.0]},
+            index=dates,
+        )
+        new_df = old_df.assign(v=[1.0, 2.0, 3.0, 9.0])
+        storage = ParquetStorage(base_path=config_for_interceptor.get_storage_path())
+        storage.save(
+            sanitize_backup_key("test:dataset"),
+            "test:dataset",
+            old_df,
+            ContentHasher().hash_dataframe(old_df),
+        )
+
+        mock_data = MagicMock()
+        mock_data.get = MagicMock(return_value=new_df)
+        mock_finlab = ModuleType("finlab")
+        mock_finlab.data = mock_data
+        sys.modules["finlab"] = mock_finlab
+        try:
+            assert accept_current_data("test:dataset", config_for_interceptor) is True
+        finally:
+            del sys.modules["finlab"]
+
+        patch_store = PatchStore(base_path=config_for_interceptor.get_storage_path())
+        patches = patch_store.list_patches("test:dataset")
+        assert len(patches) == 1
+        assert (
+            patches[0]
+            .diff_summary["summary_text"]
+            .startswith("diff unavailable: IndexError")
+        )
+        pd.testing.assert_frame_equal(
+            patch_store.load_old_data(patches[0].patch_id), old_df
+        )

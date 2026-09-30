@@ -49,6 +49,21 @@ def is_direct_child(path: Path, parent: Path) -> bool:
     )
 
 
+def is_valid_backup_key(backup_key: str) -> bool:
+    """Check that a backup key names a single directory under the backups.
+
+    Keys from sanitize_backup_key always do; one read from a tampered
+    patch.json might not.
+
+    Args:
+        backup_key: The backup key
+
+    Returns:
+        True if the key is a single path component
+    """
+    return is_direct_child(Path("backups") / backup_key, Path("backups"))
+
+
 def get_index_path(base_path: Path) -> Path:
     """Get the backup index database path for a storage base directory.
 
@@ -61,18 +76,22 @@ def get_index_path(base_path: Path) -> Path:
     return base_path.expanduser() / "data" / "index.sqlite"
 
 
-def _fsync_file(path: Path) -> None:
-    """Flush a written file (and, where supported, its directory) to disk."""
-    # Opened for update: Windows can only flush handles with write access
-    with open(path, "rb+") as f:
-        os.fsync(f.fileno())
-    # Directory fsync makes the new entry durable; unsupported on Windows.
+def _fsync_dir(path: Path) -> None:
+    """Flush a directory's entries to disk where supported (not on Windows)."""
     with contextlib.suppress(OSError):
-        dir_fd = os.open(path.parent, os.O_RDONLY)
+        dir_fd = os.open(path, os.O_RDONLY)
         try:
             os.fsync(dir_fd)
         finally:
             os.close(dir_fd)
+
+
+def _fsync_file(path: Path) -> None:
+    """Flush a written file and its directory entry to disk."""
+    # Opened for update: Windows can only flush handles with write access
+    with open(path, "rb+") as f:
+        os.fsync(f.fileno())
+    _fsync_dir(path.parent)
 
 
 def sanitize_backup_key(dataset: str, universe_hash: str | None = None) -> str:
@@ -142,10 +161,9 @@ class ParquetStorage(StorageBackend):
                 from sanitize_backup_key always are; one read from a
                 tampered patch.json might not be)
         """
-        backup_dir = self.data_path / backup_key
-        if not is_direct_child(backup_dir, self.data_path):
+        if not is_valid_backup_key(backup_key):
             raise StorageError(f"Invalid backup key: {backup_key!r}")
-        return backup_dir
+        return self.data_path / backup_key
 
     def _get_backup_file(self, backup_key: str, date: datetime) -> Path:
         """Get file path for a specific backup."""

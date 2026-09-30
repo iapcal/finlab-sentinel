@@ -3,6 +3,7 @@
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 import pyarrow.parquet as pq
@@ -1016,6 +1017,24 @@ class TestBackupWrites:
 
         assert accepted.created_at > future
         assert parquet_storage.get_latest_metadata("skew") == accepted
+
+    def test_next_timestamp_moves_past_equal_latest(self, monkeypatch):
+        """A clock reading equal to the latest backup's time is moved past it."""
+        latest_time = datetime(2026, 9, 30, 19, 0, 0, 500)
+        latest = BackupMetadata(
+            dataset="test",
+            backup_key="k",
+            content_hash="h",
+            created_at=latest_time,
+            row_count=1,
+            column_count=1,
+            file_path=Path("x.parquet"),
+        )
+        _freeze_now(monkeypatch, "finlab_sentinel.storage.parquet", latest_time)
+
+        next_time = ParquetStorage._next_created_at(latest)
+
+        assert next_time == latest_time + timedelta(microseconds=1)
 
     def test_add_latest_moves_colliding_timestamp(
         self, parquet_storage: ParquetStorage, sample_df

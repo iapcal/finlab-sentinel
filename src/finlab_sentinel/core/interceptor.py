@@ -373,7 +373,11 @@ def accept_current_data(
 
     # Create permanent patch preserving old baseline before it's superseded.
     # Patch failure must not block the accept itself.
-    from finlab_sentinel.storage.patches import PatchMetadata, PatchStore
+    from finlab_sentinel.storage.patches import (
+        PatchMetadata,
+        PatchStore,
+        preserve_baseline,
+    )
 
     patch_store = PatchStore(
         base_path=config.get_storage_path(),
@@ -382,20 +386,13 @@ def accept_current_data(
     patch_metadata: PatchMetadata | None = None
     if config.accept.create_patch and new_hash != cached_metadata.content_hash:
         try:
-            comparer = DataFrameComparer(
-                rtol=config.comparison.rtol,
-                atol=config.comparison.atol,
-                check_dtype=config.comparison.check_dtype,
-                check_na_type=config.comparison.check_na_type,
-            )
-            cached_for_comparison = preprocess_registry.apply(dataset, cached_data)
-            result = comparer.compare(cached_for_comparison, new_data_for_comparison)
-
-            patch_metadata = patch_store.create(
+            patch_metadata = preserve_baseline(
+                patch_store,
+                config,
                 dataset=dataset,
                 backup_key=backup_key,
                 old_data=cached_data,
-                comparison_result=result,
+                new_data=new_data,
                 old_hash=cached_metadata.content_hash,
                 new_hash=new_hash,
                 reason=reason,
