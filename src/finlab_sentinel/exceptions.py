@@ -55,6 +55,13 @@ class PatchNotFoundError(SentinelError):
     """Raised when a requested patch does not exist."""
 
 
+class AcceptError(SentinelError):
+    """Raised when current data cannot be accepted.
+
+    The dataset's baseline is left unchanged when this is raised.
+    """
+
+
 class PatchRestoreError(SentinelError):
     """Raised when a patch cannot be restored.
 

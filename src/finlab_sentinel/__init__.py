@@ -11,6 +11,7 @@ from finlab_sentinel.core.hooks import (
 from finlab_sentinel.core.patcher import disable, enable, is_enabled
 from finlab_sentinel.core.time_travel import TimeTravelContext
 from finlab_sentinel.exceptions import (
+    AcceptError,
     DataAnomalyError,
     NoHistoricalDataError,
     PatchNotFoundError,
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
     from finlab_sentinel.config.schema import SentinelConfig
+    from finlab_sentinel.core.interceptor import AcceptResult
     from finlab_sentinel.storage.patches import (
         PatchMetadata,
         PatchStore,
@@ -42,6 +44,7 @@ __all__ = [
     "NoHistoricalDataError",
     "PatchNotFoundError",
     "PatchRestoreError",
+    "AcceptError",
     "register_preprocess_hook",
     "unregister_preprocess_hook",
     "clear_preprocess_hooks",
@@ -51,6 +54,7 @@ __all__ = [
     "list_patches",
     "load_patch_data",
     "restore_patch",
+    "accept_dataset",
 ]
 
 
@@ -181,3 +185,40 @@ def restore_patch(
     from finlab_sentinel.storage.patches import restore_patch as _restore_patch
 
     return _restore_patch(patch_id, config=config, reason=reason, dry_run=dry_run)
+
+
+def accept_dataset(
+    dataset: str,
+    config: "SentinelConfig | None" = None,
+    reason: str | None = None,
+    require_patch: bool = False,
+) -> "AcceptResult":
+    """Accept the current data of a dataset as its new baseline.
+
+    Like ``accept_current_data`` but returns the id of the patch preserving
+    the replaced baseline (restore it to undo the accept) and raises instead
+    of returning False.
+
+    Args:
+        dataset: Dataset name to accept
+        config: Optional configuration (uses default if not provided)
+        reason: Optional reason for accepting
+        require_patch: Fail, changing nothing, unless the replaced baseline
+            is preserved as a patch whenever the baseline changes
+
+    Returns:
+        AcceptResult with the new baseline and ``patch_id``
+
+    Raises:
+        AcceptError: If nothing was accepted; the baseline is unchanged
+
+    Example:
+        >>> import finlab_sentinel as fs
+        >>> result = fs.accept_dataset("price:收盤價", require_patch=True)
+        >>> result.patch_id  # restore this to undo the accept
+    """
+    from finlab_sentinel.core.interceptor import accept_dataset as _accept_dataset
+
+    return _accept_dataset(
+        dataset, config=config, reason=reason, require_patch=require_patch
+    )

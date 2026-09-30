@@ -1023,3 +1023,220 @@ class TestAcceptPatchWhenDiffFails:
         pd.testing.assert_frame_equal(
             patch_store.load_old_data(patches[0].patch_id), old_df
         )
+
+
+@pytest.fixture
+def finlab_returns():
+    """Install a stub finlab whose data.get returns the given DataFrame."""
+    import sys
+    from types import ModuleType
+
+    def install(df: pd.DataFrame | Exception) -> None:
+        mock_data = MagicMock()
+        if isinstance(df, Exception):
+            mock_data.get = MagicMock(side_effect=df)
+        else:
+            mock_data.get = MagicMock(return_value=df)
+        mock_finlab = ModuleType("finlab")
+        mock_finlab.data = mock_data
+        sys.modules["finlab"] = mock_finlab
+
+    yield install
+    sys.modules.pop("finlab", None)
+
+
+class TestAcceptDataset:
+    """accept_dataset reports the created patch and can require one."""
+
+    @staticmethod
+    def _baseline(config: SentinelConfig, df: pd.DataFrame, content_hash=None):
+        from finlab_sentinel.comparison.hasher import ContentHasher
+        from finlab_sentinel.storage.parquet import ParquetStorage
+
+        storage = ParquetStorage(base_path=config.get_storage_path())
+        storage.save(
+            "test__dataset",
+            "test:dataset",
+            df,
+            content_hash or ContentHasher().hash_dataframe(df),
+        )
+        return storage
+
+    @staticmethod
+    def _patches(config: SentinelConfig):
+        from finlab_sentinel.storage.patches import PatchStore
+
+        return PatchStore(base_path=config.get_storage_path()).list_patches()
+
+    def test_returns_patch_that_undoes_the_accept(
+        self, config_for_interceptor: SentinelConfig, finlab_returns
+    ):
+        from finlab_sentinel.core.interceptor import accept_dataset
+        from finlab_sentinel.storage.patches import restore_patch
+
+        storage = self._baseline(config_for_interceptor, pd.DataFrame({"a": [1, 2]}))
+        previous = storage.get_latest_metadata("test__dataset")
+        finlab_returns(pd.DataFrame({"a": [1, 3]}))
+
+        result = accept_dataset("test:dataset", config_for_interceptor, "revision")
+
+        assert result.previous == previous
+        assert result.baseline == storage.get_latest_metadata("test__dataset")
+        assert [p.patch_id for p in self._patches(config_for_interceptor)] == [
+            result.patch_id
+        ]
+        assert result.patch_error is None
+        restored = restore_patch(result.patch_id, config_for_interceptor)
+        assert restored.baseline.content_hash == previous.content_hash
+
+    def test_no_patch_when_data_unchanged(
+        self, config_for_interceptor: SentinelConfig, finlab_returns
+    ):
+        from finlab_sentinel.core.interceptor import accept_dataset
+
+        df = pd.DataFrame({"a": [1, 2]})
+        self._baseline(config_for_interceptor, df)
+        finlab_returns(df.copy())
+
+        result = accept_dataset("test:dataset", config_for_interceptor)
+
+        assert result.patch_id is None
+        assert result.patch_error is None
+
+    def test_patch_failure_is_reported(
+        self, config_for_interceptor: SentinelConfig, finlab_returns
+    ):
+        from unittest.mock import patch
+
+        from finlab_sentinel.core.interceptor import accept_dataset
+
+        self._baseline(config_for_interceptor, pd.DataFrame({"a": [1, 2]}))
+        finlab_returns(pd.DataFrame({"a": [1, 3]}))
+
+        with patch(
+            "finlab_sentinel.storage.patches.PatchStore.create",
+            side_effect=OSError("disk full"),
+        ):
+            result = accept_dataset("test:dataset", config_for_interceptor)
+
+        assert result.patch_id is None
+        assert result.patch_error == "OSError: disk full"
+        assert result.baseline.content_hash != result.previous.content_hash
+
+    def test_require_patch_fails_without_changing_the_baseline(
+        self, config_for_interceptor: SentinelConfig, finlab_returns
+    ):
+        from unittest.mock import patch
+
+        from finlab_sentinel.core.interceptor import accept_dataset
+        from finlab_sentinel.exceptions import AcceptError
+
+        storage = self._baseline(config_for_interceptor, pd.DataFrame({"a": [1, 2]}))
+        previous = storage.get_latest_metadata("test__dataset")
+        finlab_returns(pd.DataFrame({"a": [1, 3]}))
+
+        with patch(
+            "finlab_sentinel.storage.patches.PatchStore.create",
+            side_effect=OSError("disk full"),
+        ):
+            with pytest.raises(AcceptError, match="nothing accepted"):
+                accept_dataset(
+                    "test:dataset", config_for_interceptor, require_patch=True
+                )
+
+        assert storage.list_backups("test__dataset") == [previous]
+        assert self._patches(config_for_interceptor) == []
+
+    def test_require_patch_preserves_changes_hidden_by_hooks(
+        self, config_for_interceptor: SentinelConfig, finlab_returns
+    ):
+        """A preprocess hook can hide a raw change; require_patch keeps it."""
+        from finlab_sentinel.comparison.hasher import ContentHasher
+        from finlab_sentinel.core.hooks import (
+            clear_preprocess_hooks,
+            register_preprocess_hook,
+        )
+        from finlab_sentinel.core.interceptor import accept_dataset
+
+        old_df = pd.DataFrame({"a": [1.111, 2.222]})
+        new_df = pd.DataFrame({"a": [1.114, 2.224]})  # equal after round(2)
+        self._baseline(
+            config_for_interceptor,
+            old_df,
+            ContentHasher().hash_dataframe(old_df.round(2)),
+        )
+        register_preprocess_hook("test:dataset", lambda df: df.round(2))
+        try:
+            finlab_returns(new_df)
+            plain = accept_dataset("test:dataset", config_for_interceptor)
+            finlab_returns(old_df)
+            required = accept_dataset(
+                "test:dataset", config_for_interceptor, require_patch=True
+            )
+        finally:
+            clear_preprocess_hooks()
+
+        assert plain.patch_id is None
+        assert required.patch_id is not None
+
+    def test_require_patch_overrides_disabled_patches(
+        self, config_for_interceptor: SentinelConfig, finlab_returns
+    ):
+        from finlab_sentinel.core.interceptor import accept_dataset
+
+        config_for_interceptor.accept.create_patch = False
+        self._baseline(config_for_interceptor, pd.DataFrame({"a": [1, 2]}))
+        finlab_returns(pd.DataFrame({"a": [1, 3]}))
+
+        result = accept_dataset(
+            "test:dataset", config_for_interceptor, require_patch=True
+        )
+
+        assert result.patch_id is not None
+
+    @pytest.mark.parametrize(
+        ("setup_baseline", "fetched", "message"),
+        [
+            (False, pd.DataFrame({"a": [1]}), "No backup found"),
+            (True, RuntimeError("API Error"), "Failed to fetch current data"),
+        ],
+    )
+    def test_failures_raise_accept_error(
+        self,
+        config_for_interceptor: SentinelConfig,
+        finlab_returns,
+        setup_baseline,
+        fetched,
+        message,
+    ):
+        from finlab_sentinel.core.interceptor import accept_dataset
+        from finlab_sentinel.exceptions import AcceptError
+
+        if setup_baseline:
+            self._baseline(config_for_interceptor, pd.DataFrame({"a": [1, 2]}))
+        finlab_returns(fetched)
+
+        with pytest.raises(AcceptError, match=message):
+            accept_dataset("test:dataset", config_for_interceptor)
+
+    def test_result_to_dict_and_package_api(
+        self, config_for_interceptor: SentinelConfig, finlab_returns, monkeypatch
+    ):
+        import json
+
+        import finlab_sentinel as fs
+
+        self._baseline(config_for_interceptor, pd.DataFrame({"a": [1, 2]}))
+        finlab_returns(pd.DataFrame({"a": [1, 3]}))
+        monkeypatch.setattr(
+            "finlab_sentinel.config.loader.load_config",
+            lambda *a, **k: config_for_interceptor,
+        )
+
+        result = fs.accept_dataset("test:dataset", reason="revision")
+        data = json.loads(json.dumps(result.to_dict()))
+
+        assert data["accepted"] is True
+        assert data["patch_id"] == result.patch_id
+        assert data["baseline"]["content_hash"] == result.baseline.content_hash
+        assert fs.AcceptError.__name__ == "AcceptError"

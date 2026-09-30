@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -18,7 +19,11 @@ from finlab_sentinel.comparison.report import AnomalyReport
 from finlab_sentinel.config.schema import SentinelConfig
 from finlab_sentinel.core.hooks import get_registry as get_preprocess_registry
 from finlab_sentinel.core.time_travel import TimeTravelContext
-from finlab_sentinel.exceptions import BaselineChangedError, NoHistoricalDataError
+from finlab_sentinel.exceptions import (
+    AcceptError,
+    BaselineChangedError,
+    NoHistoricalDataError,
+)
 from finlab_sentinel.handlers.callback import create_handler_from_config
 from finlab_sentinel.storage.backend import BackupMetadata
 from finlab_sentinel.storage.parquet import ParquetStorage, sanitize_backup_key
@@ -306,22 +311,74 @@ class DataInterceptor:
         return cached_data
 
 
-def accept_current_data(
+@dataclass
+class AcceptResult:
+    """Outcome of accepting current data (see accept_dataset).
+
+    Attributes:
+        dataset: Dataset name
+        backup_key: Backup key of the dataset
+        previous: The baseline that was replaced
+        baseline: The new baseline (the accepted data)
+        patch_id: Patch preserving ``previous``; restore it to undo the
+            accept. None if no patch was created: the data was unchanged,
+            patches are disabled, or creating one failed (see patch_error)
+        patch_error: Why creating a patch failed, if it did (only possible
+            with require_patch=False)
+    """
+
+    dataset: str
+    backup_key: str
+    previous: BackupMetadata
+    baseline: BackupMetadata
+    patch_id: str | None
+    patch_error: str | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to a JSON-serializable dictionary."""
+        return {
+            "dataset": self.dataset,
+            "backup_key": self.backup_key,
+            "accepted": True,
+            "patch_id": self.patch_id,
+            "patch_error": self.patch_error,
+            "previous": self.previous.to_dict(),
+            "baseline": self.baseline.to_dict(),
+        }
+
+
+def accept_dataset(
     dataset: str,
     config: SentinelConfig | None = None,
     reason: str | None = None,
-) -> bool:
-    """Accept current data as new baseline for a dataset.
+    require_patch: bool = False,
+) -> AcceptResult:
+    """Accept the current data of a dataset as its new baseline.
 
-    This is used to acknowledge and accept anomalous data after review.
+    The dataset is fetched again (through the original data.get when
+    sentinel is enabled) and hashed the way DataInterceptor hashes it, after
+    preprocess hooks. The replaced baseline is preserved as a permanent patch
+    and the new baseline is written with a compare-and-swap against the
+    baseline read first: if that changed meanwhile, nothing is accepted.
 
     Args:
         dataset: Dataset name to accept
         config: Optional configuration (uses default if not provided)
         reason: Optional reason for accepting
+        require_patch: Make the accept undoable or fail. A patch is then
+            created whenever the baseline changes at all (content hash or
+            raw data, even if a preprocess hook hides the difference, and
+            even with ``[accept] create_patch = false``); if it cannot be
+            created, nothing is accepted. With identical data no patch is
+            needed and ``patch_id`` is None.
 
     Returns:
-        True if successful, False if dataset not found
+        AcceptResult with the new baseline and the created patch id
+
+    Raises:
+        AcceptError: No baseline to replace, the current data could not be
+            fetched, a required patch could not be created, or the baseline
+            changed while accepting. The baseline is left unchanged.
     """
     if config is None:
         from finlab_sentinel.config.loader import load_config
@@ -339,8 +396,7 @@ def accept_current_data(
     # Get latest backup
     cached = storage.load_latest(backup_key)
     if cached is None:
-        logger.warning(f"No backup found for {dataset}")
-        return False
+        raise AcceptError(f"No backup found for {dataset}")
 
     cached_data, cached_metadata = cached
 
@@ -359,8 +415,7 @@ def accept_current_data(
             new_data = pd.DataFrame(new_data)
 
     except Exception as e:
-        logger.error(f"Failed to fetch current data for {dataset}: {e}")
-        return False
+        raise AcceptError(f"Failed to fetch current data for {dataset}: {e}") from e
 
     # Compute hash and save as accepted.
     # The stored content_hash is always over preprocessed data (see __call__),
@@ -372,19 +427,28 @@ def accept_current_data(
     new_hash = hasher.hash_dataframe(new_data_for_comparison)
 
     # Create permanent patch preserving old baseline before it's superseded.
-    # Patch failure must not block the accept itself.
+    # Unless required, patch failure must not block the accept itself.
     from finlab_sentinel.storage.patches import (
         PatchMetadata,
         PatchStore,
         preserve_baseline,
     )
 
+    hash_changed = new_hash != cached_metadata.content_hash
+    if require_patch:
+        want_patch = hash_changed or hasher.hash_dataframe(
+            cached_data
+        ) != hasher.hash_dataframe(new_data)
+    else:
+        want_patch = config.accept.create_patch and hash_changed
+
     patch_store = PatchStore(
         base_path=config.get_storage_path(),
         compression=config.storage.compression,
     )
     patch_metadata: PatchMetadata | None = None
-    if config.accept.create_patch and new_hash != cached_metadata.content_hash:
+    patch_error: str | None = None
+    if want_patch:
         try:
             patch_metadata = preserve_baseline(
                 patch_store,
@@ -399,6 +463,12 @@ def accept_current_data(
             )
             logger.info(f"Permanent patch created: {patch_metadata.patch_id}")
         except Exception as e:
+            if require_patch:
+                raise AcceptError(
+                    f"Failed to create permanent patch for {dataset}; "
+                    f"nothing accepted: {e}"
+                ) from e
+            patch_error = f"{type(e).__name__}: {e}"
             logger.error(
                 f"Failed to create permanent patch for {dataset}: {e}. "
                 f"Accept will proceed without a patch."
@@ -407,7 +477,7 @@ def accept_current_data(
     # Only replace the baseline read above; a baseline written meanwhile (by
     # data.get or a patch restore) is never superseded by this accept.
     try:
-        storage.accept_new_data(
+        baseline = storage.accept_new_data(
             backup_key=backup_key,
             data=new_data,
             content_hash=new_hash,
@@ -415,15 +485,50 @@ def accept_current_data(
             reason=reason,
             expected_latest=cached_metadata,
         )
-    except BaselineChangedError:
-        logger.error(f"Baseline of {dataset} changed while accepting; not accepted")
+    except BaselineChangedError as e:
         if patch_metadata is not None:
             with contextlib.suppress(Exception):
                 patch_store.delete(patch_metadata.patch_id)
-        return False
+        raise AcceptError(
+            f"Baseline of {dataset} changed while accepting; nothing accepted"
+        ) from e
 
     logger.info(
         f"Accepted new data for {dataset}" + (f" (reason: {reason})" if reason else "")
     )
 
+    return AcceptResult(
+        dataset=dataset,
+        backup_key=backup_key,
+        previous=cached_metadata,
+        baseline=baseline,
+        patch_id=patch_metadata.patch_id if patch_metadata is not None else None,
+        patch_error=patch_error,
+    )
+
+
+def accept_current_data(
+    dataset: str,
+    config: SentinelConfig | None = None,
+    reason: str | None = None,
+) -> bool:
+    """Accept current data as new baseline for a dataset.
+
+    This is used to acknowledge and accept anomalous data after review.
+    See accept_dataset for a variant that reports the created patch.
+
+    Args:
+        dataset: Dataset name to accept
+        config: Optional configuration (uses default if not provided)
+        reason: Optional reason for accepting
+
+    Returns:
+        True if successful, False if dataset not found, its current data
+        could not be fetched, or its baseline changed while accepting
+    """
+    try:
+        accept_dataset(dataset, config, reason)
+    except AcceptError as e:
+        logger.error(str(e))
+        return False
     return True

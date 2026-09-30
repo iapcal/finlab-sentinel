@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, NoReturn
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 if TYPE_CHECKING:
@@ -269,22 +270,54 @@ def accept(
         "-r",
         help="Reason for accepting the new data",
     ),
+    require_patch: bool = typer.Option(
+        False,
+        "--require-patch",
+        help="Accept only if the replaced baseline is saved as a patch "
+        "(so the accept can be undone); otherwise change nothing",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Print the result as one line of JSON",
+    ),
 ) -> None:
-    """Accept current data as new baseline."""
+    """Accept current data as new baseline.
+
+    The replaced baseline is saved as a permanent patch; restore it with
+    `sentinel patch restore <patch_id>` to undo the accept.
+    """
     from finlab_sentinel.config.loader import load_config
-    from finlab_sentinel.core.interceptor import accept_current_data
+    from finlab_sentinel.core.interceptor import accept_dataset
+    from finlab_sentinel.exceptions import AcceptError
 
     config = load_config(_config_path)
 
-    success = accept_current_data(dataset, config, reason)
+    try:
+        result = accept_dataset(dataset, config, reason, require_patch=require_patch)
+    except AcceptError as e:
+        if json_output:
+            _echo_json({"dataset": dataset, "accepted": False, "error": str(e)})
+        else:
+            console.print(f"[red]Failed to accept data for: {escape(dataset)}[/red]")
+            console.print(f"  {escape(str(e))}")
+        raise typer.Exit(1) from None
 
-    if success:
-        console.print(f"[green]Accepted new data for: {dataset}[/green]")
-        if reason:
-            console.print(f"  Reason: {reason}")
+    if json_output:
+        _echo_json(result.to_dict())
+        return
+
+    console.print(f"[green]Accepted new data for: {escape(dataset)}[/green]")
+    if reason:
+        console.print(f"  Reason: {escape(reason)}")
+    if result.patch_id:
+        console.print(f"  Patch: {result.patch_id}")
+    elif result.patch_error:
+        console.print(
+            f"  [yellow]No patch created: {escape(result.patch_error)}[/yellow]"
+        )
     else:
-        console.print(f"[red]Failed to accept data for: {dataset}[/red]")
-        raise typer.Exit(1)
+        console.print("  No patch created (nothing to preserve)")
 
 
 patch_app = typer.Typer(help="Manage permanent patches created when accepting data.")
@@ -537,7 +570,7 @@ def _restore_failed(patch_id: str, message: str, json_output: bool) -> NoReturn:
     if json_output:
         _echo_json({"patch_id": patch_id, "changed": False, "error": message})
     else:
-        console.print(f"[red]{message}[/red]")
+        console.print(f"[red]{escape(message)}[/red]")
     raise typer.Exit(1)
 
 

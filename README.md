@@ -98,8 +98,11 @@ sentinel cleanup --days 14
 # 查看資料差異
 sentinel diff "price:收盤價"
 
-# 接受新資料作為基準
+# 接受新資料作為基準（會印出保存舊 baseline 的 patch id）
 sentinel accept "price:收盤價" --reason "確認資料修正"
+
+# 一定要能撤銷：無法建立 patch 時不接受、不做任何變更；--json 輸出單行 JSON
+sentinel accept "price:收盤價" --require-patch --json
 
 # 匯出備份
 sentinel export "price:收盤價" -o ./backup.parquet
@@ -130,6 +133,18 @@ except DataAnomalyError as e:
     from finlab_sentinel.core.interceptor import accept_current_data
     accept_current_data('price:收盤價', reason="確認資料修正")
 ```
+
+需要知道 accept 產生的 patch（例如之後要撤銷）時，改用 `accept_dataset`：
+
+```python
+import finlab_sentinel as fs
+
+result = fs.accept_dataset("price:收盤價", reason="確認資料修正", require_patch=True)
+result.patch_id    # 保存舊 baseline 的 patch；fs.restore_patch(result.patch_id) 即撤銷
+result.to_dict()   # 可序列化成 JSON 的結果摘要
+```
+
+`accept_dataset` 失敗時拋出 `AcceptError`（找不到 baseline、取不到目前資料、`require_patch=True` 卻無法建立 patch、或 accept 途中 baseline 被其他程序更新），baseline 保持不變。`require_patch=True` 時，只要 baseline 有任何改變（content hash 或原始資料，即使 preprocess hook 讓 hash 相同、或 `[accept] create_patch = false`）都會建立 patch；資料完全相同時不需要 patch，`patch_id` 為 `None`。
 
 ## Preprocess Hook
 
@@ -342,7 +357,7 @@ fs.restore_patch("price__收盤價__2026-07-11T10-30-00", expected_latest=previe
 create_patch = false
 ```
 
-注意：若 accept 時新資料與現有 baseline 完全相同（hash 一致），不會產生 patch；patch 建立失敗（如磁碟已滿）不會阻擋 accept 本身，只會記錄錯誤日誌。
+注意：若 accept 時新資料與現有 baseline 完全相同（hash 一致），不會產生 patch；patch 建立失敗（如磁碟已滿）不會阻擋 accept 本身，只會記錄錯誤日誌（`accept_dataset` 的 `patch_error` 會說明原因；要讓 accept 在這種情況下失敗，請用 `--require-patch` / `require_patch=True`）。無法計算 diff 時（例如 index 重複），patch 仍會建立，diff 摘要記為 `diff unavailable`。
 
 ## 自訂通知
 

@@ -21,6 +21,34 @@ def mock_config(tmp_path: Path) -> SentinelConfig:
 
 
 @pytest.fixture
+def accept_result():
+    """An AcceptResult as accept_dataset returns it."""
+    from datetime import datetime
+
+    from finlab_sentinel.core.interceptor import AcceptResult
+    from finlab_sentinel.storage.backend import BackupMetadata
+
+    def backup(content_hash: str) -> BackupMetadata:
+        return BackupMetadata(
+            dataset="test:dataset",
+            backup_key="test__dataset",
+            content_hash=content_hash,
+            created_at=datetime(2026, 9, 30, 3, 30),
+            row_count=3,
+            column_count=2,
+            file_path=Path("x.parquet"),
+        )
+
+    return AcceptResult(
+        dataset="test:dataset",
+        backup_key="test__dataset",
+        previous=backup("oldhash"),
+        baseline=backup("newhash"),
+        patch_id="test__dataset__2026-09-30T03-30-00",
+    )
+
+
+@pytest.fixture
 def populated_storage(tmp_path: Path, sample_df: pd.DataFrame) -> ParquetStorage:
     """Create storage with some test data."""
     storage = ParquetStorage(base_path=tmp_path / "backups")
@@ -273,33 +301,38 @@ class TestAcceptCommand:
 
     def test_accept_missing_dataset(self, mock_config: SentinelConfig):
         """Verify accept fails for missing dataset."""
+        from finlab_sentinel.exceptions import AcceptError
+
         with patch(
             "finlab_sentinel.config.loader.load_config", return_value=mock_config
         ):
             with patch(
-                "finlab_sentinel.core.interceptor.accept_current_data",
-                return_value=False,
+                "finlab_sentinel.core.interceptor.accept_dataset",
+                side_effect=AcceptError("No backup found for missing:dataset"),
             ):
                 result = runner.invoke(app, ["accept", "missing:dataset"])
 
         assert result.exit_code == 1
         assert "Failed to accept" in result.stdout
+        assert "No backup found" in result.stdout
 
-    def test_accept_success(self, mock_config: SentinelConfig):
-        """Verify accept succeeds."""
+    def test_accept_success(self, mock_config: SentinelConfig, accept_result):
+        """Verify accept succeeds and prints the patch id."""
         with patch(
             "finlab_sentinel.config.loader.load_config", return_value=mock_config
         ):
             with patch(
-                "finlab_sentinel.core.interceptor.accept_current_data",
-                return_value=True,
-            ):
+                "finlab_sentinel.core.interceptor.accept_dataset",
+                return_value=accept_result,
+            ) as accept_dataset:
                 result = runner.invoke(
                     app, ["accept", "test:dataset", "--reason", "Test reason"]
                 )
 
         assert result.exit_code == 0
         assert "Accepted new data" in result.stdout
+        assert "Patch: test__dataset__2026-09-30T03-30-00" in result.stdout
+        assert accept_dataset.call_args.kwargs == {"require_patch": False}
 
 
 class TestDiffCommand:
@@ -837,14 +870,14 @@ class TestInfoCommandExtended:
 class TestAcceptCommandExtended:
     """Extended tests for accept command."""
 
-    def test_accept_without_reason(self, mock_config: SentinelConfig):
+    def test_accept_without_reason(self, mock_config: SentinelConfig, accept_result):
         """Verify accept works without reason."""
         with patch(
             "finlab_sentinel.config.loader.load_config", return_value=mock_config
         ):
             with patch(
-                "finlab_sentinel.core.interceptor.accept_current_data",
-                return_value=True,
+                "finlab_sentinel.core.interceptor.accept_dataset",
+                return_value=accept_result,
             ):
                 result = runner.invoke(app, ["accept", "test:dataset"])
 
@@ -1333,3 +1366,88 @@ class TestPatchRestoreCommand:
         latest = storage.get_latest_metadata("price__收盤價")
         assert latest.content_hash == "saved-meanwhile"
         assert len(store.list_patches()) == 1
+
+
+class TestAcceptCommandPatchReporting:
+    """Tests for accept --require-patch / --json and patch reporting."""
+
+    @staticmethod
+    def _invoke(mock_config: SentinelConfig, args: list[str], **accept_kwargs):
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
+            with patch(
+                "finlab_sentinel.core.interceptor.accept_dataset", **accept_kwargs
+            ) as accept_dataset:
+                result = runner.invoke(app, ["accept", *args])
+        return result, accept_dataset
+
+    def test_require_patch_is_passed_through(
+        self, mock_config: SentinelConfig, accept_result
+    ):
+        """Verify --require-patch reaches accept_dataset."""
+        result, accept_dataset = self._invoke(
+            mock_config,
+            ["test:dataset", "--require-patch"],
+            return_value=accept_result,
+        )
+
+        assert result.exit_code == 0
+        assert accept_dataset.call_args.kwargs == {"require_patch": True}
+
+    def test_json_success(self, mock_config: SentinelConfig, accept_result):
+        """Verify --json prints the result as one JSON line."""
+        import json
+
+        result, _ = self._invoke(
+            mock_config, ["test:dataset", "--json"], return_value=accept_result
+        )
+
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)
+        assert data["accepted"] is True
+        assert data["patch_id"] == "test__dataset__2026-09-30T03-30-00"
+        assert data["previous"]["content_hash"] == "oldhash"
+
+    def test_json_failure(self, mock_config: SentinelConfig):
+        """Verify --json reports a failed accept as JSON with exit code 1."""
+        import json
+
+        from finlab_sentinel.exceptions import AcceptError
+
+        result, _ = self._invoke(
+            mock_config,
+            ["test:dataset", "--json"],
+            side_effect=AcceptError("No backup found for test:dataset"),
+        )
+
+        assert result.exit_code == 1
+        assert json.loads(result.stdout) == {
+            "dataset": "test:dataset",
+            "accepted": False,
+            "error": "No backup found for test:dataset",
+        }
+
+    def test_reports_patch_error(self, mock_config: SentinelConfig, accept_result):
+        """Verify a failed (optional) patch is reported."""
+        from dataclasses import replace
+
+        failed = replace(accept_result, patch_id=None, patch_error="OSError: full")
+
+        result, _ = self._invoke(mock_config, ["test:dataset"], return_value=failed)
+
+        assert result.exit_code == 0
+        assert "No patch created: OSError: full" in result.stdout
+
+    def test_error_text_is_not_treated_as_markup(self, mock_config: SentinelConfig):
+        """Verify error messages with brackets print literally."""
+        from finlab_sentinel.exceptions import AcceptError
+
+        result, _ = self._invoke(
+            mock_config,
+            ["test:dataset"],
+            side_effect=AcceptError("fetch failed: [Errno 2] bad [/x] tag"),
+        )
+
+        assert result.exit_code == 1
+        assert "fetch failed: [Errno 2] bad [/x] tag" in result.stdout
