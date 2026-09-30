@@ -365,6 +365,16 @@ class BackupIndex:
 
             return [self._row_to_metadata(row) for row in rows]
 
+    def referenced_files(self) -> set[Path]:
+        """Get the files referenced by any backup entry.
+
+        Returns:
+            Set of backup file paths still in use
+        """
+        with self._connect() as conn:
+            rows = conn.execute("SELECT DISTINCT file_path FROM backups").fetchall()
+            return {Path(row["file_path"]) for row in rows}
+
     def get_unique_keys(self) -> list[str]:
         """Get list of unique backup keys.
 

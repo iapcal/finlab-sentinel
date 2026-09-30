@@ -769,3 +769,102 @@ class TestSameSecondWrites:
 
         assert parquet_storage.list_backups("broken") == []
         assert list(parquet_storage._get_backup_dir("broken").iterdir()) == []
+
+
+class TestSharedBackupFiles:
+    """Index entries written by 0.1.9 within one second may share a file."""
+
+    @staticmethod
+    def _legacy_shared_file(
+        storage: ParquetStorage, older_df: pd.DataFrame, newer_df: pd.DataFrame
+    ):
+        """Emulate 0.1.9: a same-second write overwrote the older entry's file."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        older = storage.save("shared", "test", older_df, "hash_old")
+        pq.write_table(pa.Table.from_pandas(newer_df), older.file_path)
+        newer = BackupMetadata(
+            dataset="test",
+            backup_key="shared",
+            content_hash="hash_new",
+            created_at=older.created_at + timedelta(milliseconds=500),
+            row_count=len(newer_df),
+            column_count=len(newer_df.columns),
+            file_path=older.file_path,
+            file_size_bytes=older.file_path.stat().st_size,
+        )
+        storage.index.add(newer)
+        return older, newer
+
+    @staticmethod
+    def _set_created_at(storage: ParquetStorage, content_hash: str, when: datetime):
+        with storage.index._connect() as conn:
+            conn.execute(
+                "UPDATE backups SET created_at = ? WHERE content_hash = ?",
+                (when.isoformat(), content_hash),
+            )
+
+    def test_cleanup_keeps_file_of_latest_entry(
+        self, parquet_storage: ParquetStorage, sample_df, sample_df_modified
+    ):
+        """Expiring the older entry must not delete the latest entry's file."""
+        self._legacy_shared_file(parquet_storage, sample_df, sample_df_modified)
+        now = datetime.now()
+        self._set_created_at(parquet_storage, "hash_old", now - timedelta(days=30))
+        self._set_created_at(parquet_storage, "hash_new", now - timedelta(days=1))
+
+        parquet_storage.cleanup_expired(retention_days=7, min_keep_per_key=1)
+
+        remaining = parquet_storage.list_backups("shared")
+        assert [b.content_hash for b in remaining] == ["hash_new"]
+        assert remaining[0].file_path.exists()
+        loaded, metadata = parquet_storage.load_latest("shared")
+        assert metadata.content_hash == "hash_new"
+        pd.testing.assert_frame_equal(loaded, sample_df_modified, check_freq=False)
+
+    def test_delete_by_date_keeps_file_of_other_entry(
+        self, parquet_storage: ParquetStorage, sample_df, sample_df_modified
+    ):
+        """Deleting one date's entry must not delete a file another entry uses."""
+        self._legacy_shared_file(parquet_storage, sample_df, sample_df_modified)
+        yesterday = datetime.now() - timedelta(days=1)
+        self._set_created_at(parquet_storage, "hash_old", yesterday)
+
+        parquet_storage.delete("shared", yesterday)
+
+        loaded, metadata = parquet_storage.load_latest("shared")
+        assert metadata.content_hash == "hash_new"
+        pd.testing.assert_frame_equal(loaded, sample_df_modified, check_freq=False)
+
+    def test_file_is_deleted_once_no_entry_uses_it(
+        self, parquet_storage: ParquetStorage, sample_df, sample_df_modified
+    ):
+        """Removing every entry of a shared file deletes the file."""
+        older, _ = self._legacy_shared_file(
+            parquet_storage, sample_df, sample_df_modified
+        )
+
+        parquet_storage.delete("shared")
+
+        assert parquet_storage.list_backups("shared") == []
+        assert not older.file_path.exists()
+
+    def test_copied_storage_does_not_delete_original_files(
+        self, tmp_path, sample_df, sample_df_modified
+    ):
+        """A copy's index points at the original's files; never delete them."""
+        import shutil
+
+        original = ParquetStorage(base_path=tmp_path / "original")
+        first = original.save("ds", "test", sample_df, "hash1")
+        original.save("ds", "test", sample_df_modified, "hash2")
+        shutil.copytree(tmp_path / "original", tmp_path / "copy")
+        copy = ParquetStorage(base_path=tmp_path / "copy")
+
+        copy.delete("ds")
+
+        assert first.file_path.exists()
+        loaded, metadata = original.load_latest("ds")
+        assert metadata.content_hash == "hash2"
+        pd.testing.assert_frame_equal(loaded, sample_df_modified, check_freq=False)

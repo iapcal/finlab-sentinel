@@ -287,6 +287,34 @@ class ParquetStorage(StorageBackend):
         """List all backups, optionally filtered by key."""
         return self.index.list_all(backup_key)
 
+    def _keep_file(self, metadata: BackupMetadata, still_used: set[Path]) -> bool:
+        """Check whether a removed index entry's file must be kept.
+
+        Versions up to 0.1.9 could point several index entries at one file
+        (backups written within the same second), so the file of a removed
+        entry may still hold the data of a newer, retained entry. Index
+        entries store absolute paths, so a copied storage directory still
+        points at the original's files; those are never deleted either.
+        """
+        if metadata.file_path in still_used:
+            logger.warning(
+                f"Keeping {metadata.file_path}: still used by another backup "
+                f"of {metadata.backup_key}"
+            )
+            return True
+        try:
+            inside = metadata.file_path.resolve().is_relative_to(
+                self.data_path.resolve()
+            )
+        except (OSError, ValueError):
+            inside = False
+        if not inside:
+            logger.warning(
+                f"Keeping {metadata.file_path}: outside this storage ({self.data_path})"
+            )
+            return True
+        return False
+
     def cleanup_expired(self, retention_days: int, min_keep_per_key: int = 3) -> int:
         """Remove backups older than retention period.
 
@@ -301,8 +329,11 @@ class ParquetStorage(StorageBackend):
         deleted_metadata = self.index.delete_expired(cutoff, min_keep_per_key)
 
         # Delete actual files
+        still_used = self.index.referenced_files()
         deleted_count = 0
         for metadata in deleted_metadata:
+            if self._keep_file(metadata, still_used):
+                continue
             if metadata.file_path.exists():
                 try:
                     metadata.file_path.unlink()
@@ -331,8 +362,11 @@ class ParquetStorage(StorageBackend):
         deleted_metadata = self.index.delete_by_key(backup_key, date)
 
         # Delete actual files
+        still_used = self.index.referenced_files()
         deleted_count = 0
         for metadata in deleted_metadata:
+            if self._keep_file(metadata, still_used):
+                continue
             if metadata.file_path.exists():
                 try:
                     metadata.file_path.unlink()
