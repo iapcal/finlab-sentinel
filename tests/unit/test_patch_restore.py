@@ -615,6 +615,67 @@ class TestPublicAPI:
         with pytest.raises(fs.PatchNotFoundError):
             fs.restore_patch("nonexistent__2026-01-01T00-00-00", config)
 
+    def test_restore_patch_with_expected_latest(self, config, finlab_frames):
+        """The README flow: preview, then restore only what was previewed."""
+        import finlab_sentinel as fs
+
+        original = _price_frame()
+        patch_meta = _baseline_then_accept(config, finlab_frames, original)
+        preview = fs.restore_patch(patch_meta.patch_id, config, dry_run=True)
+
+        # The baseline moves on after the preview: nothing is restored
+        _storage(config).save(KEY, DATASET, original, "saved-after-preview")
+        root = config.get_storage_path()
+        before = _snapshot(root)
+        with pytest.raises(fs.PatchRestoreError, match="changed since it was read"):
+            fs.restore_patch(
+                patch_meta.patch_id, config, expected_latest=preview.latest
+            )
+        assert _snapshot(root) == before
+
+        # A fresh preview matches, so the restore goes ahead
+        preview = fs.restore_patch(patch_meta.patch_id, config, dry_run=True)
+        result = fs.restore_patch(
+            patch_meta.patch_id, config, expected_latest=preview.latest
+        )
+        assert result.changed
+        assert result.previous == preview.latest
+        assert _storage(config).get_latest_metadata(KEY) == result.baseline
+        assert result.baseline.content_hash == patch_meta.old_hash
+
+    @pytest.mark.parametrize(
+        ("wrapper_name", "inner"),
+        [
+            ("restore_patch", "finlab_sentinel.storage.patches:restore_patch"),
+            ("accept_dataset", "finlab_sentinel.core.interceptor:accept_dataset"),
+            ("list_patches", "finlab_sentinel.storage.patches:PatchStore.list_patches"),
+            (
+                "load_patch_data",
+                "finlab_sentinel.storage.patches:PatchStore.load_old_data",
+            ),
+        ],
+    )
+    def test_package_wrappers_match_what_they_wrap(self, wrapper_name, inner):
+        """Package-level wrappers take the same arguments as their targets."""
+        import importlib
+        import inspect
+
+        import finlab_sentinel as fs
+
+        module_name, qualname = inner.split(":")
+        target = importlib.import_module(module_name)
+        for attr in qualname.split("."):
+            target = getattr(target, attr)
+
+        def params(func):
+            return [
+                (p.name, p.kind, p.default)
+                for p in inspect.signature(func).parameters.values()
+                if p.name != "self"
+            ]
+
+        assert params(getattr(fs, wrapper_name)) == params(target)
+
 
 class TestConcurrentWrites:
     """Restore and data.get never supersede a baseline they did not read."""

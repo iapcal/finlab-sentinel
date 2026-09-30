@@ -5,22 +5,13 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
 from pathlib import Path
-from typing import Final
 
 import pandas as pd
 
+from finlab_sentinel._unset import UNSET, _Unset
 
-class _Unset(Enum):
-    """Type of UNSET."""
-
-    UNSET = "UNSET"
-
-
-# Marker for an omitted ``expected_latest`` argument (no compare-and-swap);
-# distinct from None, which means "the key has no backups".
-UNSET: Final = _Unset.UNSET
+__all__ = ["UNSET", "BackupMetadata", "StorageBackend", "_Unset"]
 
 
 @dataclass

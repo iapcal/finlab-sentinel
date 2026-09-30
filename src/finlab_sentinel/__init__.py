@@ -3,6 +3,7 @@
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from finlab_sentinel._unset import UNSET, _Unset
 from finlab_sentinel.core.hooks import (
     clear_preprocess_hooks,
     register_preprocess_hook,
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
 
     from finlab_sentinel.config.schema import SentinelConfig
     from finlab_sentinel.core.interceptor import AcceptResult
+    from finlab_sentinel.storage.backend import BackupMetadata
     from finlab_sentinel.storage.patches import (
         PatchMetadata,
         PatchStore,
@@ -155,6 +157,7 @@ def restore_patch(
     config: "SentinelConfig | None" = None,
     reason: str | None = None,
     dry_run: bool = False,
+    expected_latest: "BackupMetadata | None | _Unset" = UNSET,
 ) -> "RestoreResult":
     """Restore the baseline preserved by a patch, undoing its accept.
 
@@ -169,6 +172,8 @@ def restore_patch(
         config: Optional configuration (uses default if not provided)
         reason: Reason recorded on the new patch (default: "restore of <id>")
         dry_run: Only report what would change, without writing anything
+        expected_latest: If given (typically ``latest`` from a dry run),
+            abort unless the dataset's latest backup is still this entry
 
     Returns:
         RestoreResult describing the previous and restored baselines
@@ -179,12 +184,20 @@ def restore_patch(
 
     Example:
         >>> import finlab_sentinel as fs
-        >>> result = fs.restore_patch("price__收盤價__2026-07-11T10-30-00")
+        >>> patch_id = "price__收盤價__2026-07-11T10-30-00"
+        >>> preview = fs.restore_patch(patch_id, dry_run=True)
+        >>> result = fs.restore_patch(patch_id, expected_latest=preview.latest)
         >>> result.new_patch_id  # restore this to undo the restore
     """
     from finlab_sentinel.storage.patches import restore_patch as _restore_patch
 
-    return _restore_patch(patch_id, config=config, reason=reason, dry_run=dry_run)
+    return _restore_patch(
+        patch_id,
+        config=config,
+        reason=reason,
+        dry_run=dry_run,
+        expected_latest=expected_latest,
+    )
 
 
 def accept_dataset(
