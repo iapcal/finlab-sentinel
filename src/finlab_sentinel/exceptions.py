@@ -28,6 +28,14 @@ class StorageError(SentinelError):
     """Raised when there's a storage-related error."""
 
 
+class BaselineChangedError(StorageError):
+    """Raised when a dataset's latest backup changed before a write.
+
+    Writes that must not supersede a baseline they did not read (e.g. a
+    concurrent accept or patch restore) raise this; nothing is written.
+    """
+
+
 class ComparisonError(SentinelError):
     """Raised when there's an error during data comparison."""
 

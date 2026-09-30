@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import itertools
 import logging
 import os
 from datetime import datetime, timedelta
@@ -14,11 +15,38 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from finlab_sentinel.exceptions import StorageError
-from finlab_sentinel.storage.backend import BackupMetadata, StorageBackend
+from finlab_sentinel.exceptions import BaselineChangedError, StorageError
+from finlab_sentinel.storage.backend import (
+    UNSET,
+    BackupMetadata,
+    StorageBackend,
+    _Unset,
+)
 from finlab_sentinel.storage.index import BackupIndex
 
 logger = logging.getLogger(__name__)
+
+
+def is_direct_child(path: Path, parent: Path) -> bool:
+    """Check that ``path`` names an entry directly inside ``parent``.
+
+    The check is lexical ("..", "." and separators are resolved without
+    touching the filesystem), so it rejects names such as "..", "a/b" or
+    absolute paths that would escape ``parent``.
+
+    Args:
+        path: Candidate path, typically ``parent / name``
+        parent: Directory the entry must be directly inside
+
+    Returns:
+        True if ``path`` is a direct child of ``parent``
+    """
+    child = Path(os.path.normpath(path))
+    return child.parent == Path(os.path.normpath(parent)) and child.name not in (
+        "",
+        ".",
+        "..",
+    )
 
 
 def get_index_path(base_path: Path) -> Path:
@@ -107,8 +135,17 @@ class ParquetStorage(StorageBackend):
         logger.debug(f"Initialized ParquetStorage at {self.base_path}")
 
     def _get_backup_dir(self, backup_key: str) -> Path:
-        """Get directory for a backup key."""
-        return self.data_path / backup_key
+        """Get directory for a backup key.
+
+        Raises:
+            StorageError: If the key is not a single path component (keys
+                from sanitize_backup_key always are; one read from a
+                tampered patch.json might not be)
+        """
+        backup_dir = self.data_path / backup_key
+        if not is_direct_child(backup_dir, self.data_path):
+            raise StorageError(f"Invalid backup key: {backup_key!r}")
+        return backup_dir
 
     def _get_backup_file(self, backup_key: str, date: datetime) -> Path:
         """Get file path for a specific backup."""
@@ -116,27 +153,32 @@ class ParquetStorage(StorageBackend):
         timestamp = date.strftime("%Y-%m-%dT%H-%M-%S")
         return self._get_backup_dir(backup_key) / f"{timestamp}.parquet"
 
-    def _new_backup_file(self, backup_key: str, date: datetime) -> Path:
-        """Get a path for a new backup file that does not exist yet.
+    def _claim_backup_file(self, backup_key: str, date: datetime) -> Path:
+        """Create a new, empty backup file and return its path.
 
         Several backups of one key can be written within the same second
-        (e.g. a baseline that is saved and then immediately replaced).
-        Reusing the second-level name would overwrite a file an older index
-        entry still points to, and retention cleanup of that entry would
-        later delete the newer baseline's data, so fall back to a
-        microsecond-precision name.
+        (e.g. a baseline that is saved and then immediately replaced). Each
+        one gets its own file: the file is created exclusively, so neither a
+        later write nor a concurrent writer can reuse the name and overwrite
+        a file an older index entry still points to. Fallback names add the
+        microseconds after "_", which sorts after the plain name's ".".
         """
-        file_path = self._get_backup_file(backup_key, date)
-        if not file_path.exists():
-            return file_path
+        base = self._get_backup_file(backup_key, date)
+        base.parent.mkdir(parents=True, exist_ok=True)
 
-        stem = date.strftime("%Y-%m-%dT%H-%M-%S-%f")
-        file_path = file_path.with_name(f"{stem}.parquet")
-        counter = 1
-        while file_path.exists():
-            counter += 1
-            file_path = file_path.with_name(f"{stem}_{counter}.parquet")
-        return file_path
+        precise = f"{base.stem}_{date.strftime('%f')}"
+        names = itertools.chain(
+            [base.name, f"{precise}.parquet"],
+            (f"{precise}_{n}.parquet" for n in itertools.count(2)),
+        )
+        for name in names:
+            file_path = base.with_name(name)
+            try:
+                with open(file_path, "xb"):
+                    return file_path
+            except FileExistsError:
+                continue
+        raise AssertionError("unreachable: the file name candidates never run out")
 
     def _write_backup(
         self,
@@ -160,15 +202,12 @@ class ParquetStorage(StorageBackend):
         Returns:
             Metadata describing the written file
         """
-        backup_dir = self._get_backup_dir(backup_key)
-        backup_dir.mkdir(parents=True, exist_ok=True)
-
-        file_path = self._new_backup_file(backup_key, created_at)
+        from finlab_sentinel import __version__
 
         # Convert to PyArrow table with metadata
         table = pa.Table.from_pandas(data)
         metadata = {
-            b"sentinel_version": b"0.1.9",
+            b"sentinel_version": __version__.encode(),
             b"created_at": created_at.isoformat().encode(),
             b"content_hash": content_hash.encode(),
             b"dataset": dataset.encode(),
@@ -177,10 +216,12 @@ class ParquetStorage(StorageBackend):
         }
         table = table.replace_schema_metadata({**table.schema.metadata, **metadata})
 
-        # Write to Parquet; never leave a partial file behind
+        file_path = self._claim_backup_file(backup_key, created_at)
         try:
             pq.write_table(table, file_path, compression=self.compression)
+            file_size = file_path.stat().st_size
         except Exception:
+            # The file was created exclusively above, so it is ours to remove
             file_path.unlink(missing_ok=True)
             raise
 
@@ -192,8 +233,68 @@ class ParquetStorage(StorageBackend):
             row_count=len(data),
             column_count=len(data.columns),
             file_path=file_path,
-            file_size_bytes=file_path.stat().st_size,
+            file_size_bytes=file_size,
         )
+
+    @staticmethod
+    def _next_created_at(latest: BackupMetadata | None) -> datetime:
+        """Timestamp for a new backup that sorts after the key's latest one.
+
+        ``datetime.now()`` can repeat (coarse clocks, e.g. 15.6 ms on older
+        Windows) or go backwards, which would violate UNIQUE(backup_key,
+        created_at) or sort a new baseline before an older one.
+        """
+        now = datetime.now()
+        if latest is not None and latest.created_at >= now:
+            return latest.created_at + timedelta(microseconds=1)
+        return now
+
+    def _commit(
+        self,
+        backup_metadata: BackupMetadata,
+        reason: str | None = None,
+        expected_latest: BackupMetadata | None | _Unset = UNSET,
+        fsync: bool = False,
+    ) -> BackupMetadata:
+        """Add a written backup file to the index as the key's latest backup.
+
+        The file is removed again if it cannot be indexed, so no orphan file
+        is left behind.
+
+        Args:
+            backup_metadata: Metadata returned by _write_backup
+            reason: Optional reason stored with the index entry
+            expected_latest: If given, only add the entry if this is still
+                the key's latest backup (compare-and-swap)
+            fsync: Flush the file to disk before indexing it
+
+        Returns:
+            The indexed metadata (``created_at`` possibly moved forward)
+
+        Raises:
+            BaselineChangedError: If the latest backup is no longer
+                ``expected_latest``
+        """
+        file_path = backup_metadata.file_path
+        try:
+            if fsync:
+                _fsync_file(file_path)
+            if expected_latest is UNSET:
+                return self.index.add_latest(backup_metadata, reason=reason)
+            added = self.index.add_if_latest(
+                backup_metadata, expected_latest, reason=reason
+            )
+        except Exception:
+            file_path.unlink(missing_ok=True)
+            raise
+
+        if added is None:
+            file_path.unlink(missing_ok=True)
+            raise BaselineChangedError(
+                f"Latest backup of {backup_metadata.backup_key} changed; "
+                f"nothing written"
+            )
+        return added
 
     def save(
         self,
@@ -203,12 +304,11 @@ class ParquetStorage(StorageBackend):
         content_hash: str,
     ) -> BackupMetadata:
         """Save DataFrame to Parquet storage."""
+        created_at = self._next_created_at(self.index.get_latest(backup_key))
         backup_metadata = self._write_backup(
-            backup_key, dataset, data, content_hash, datetime.now()
+            backup_key, dataset, data, content_hash, created_at
         )
-
-        # Add to index
-        self.index.add(backup_metadata)
+        backup_metadata = self._commit(backup_metadata)
 
         logger.info(
             f"Saved backup: {backup_key} ({len(data)} rows, "
@@ -394,17 +494,18 @@ class ParquetStorage(StorageBackend):
         if reason:
             extra_metadata[b"accepted_reason"] = reason.encode()
 
+        created_at = self._next_created_at(self.index.get_latest(backup_key))
         backup_metadata = self._write_backup(
             backup_key,
             dataset,
             data,
             content_hash,
-            datetime.now(),
+            created_at,
             extra_metadata,
         )
 
         # Add to index with reason
-        self.index.add(backup_metadata, reason=reason)
+        backup_metadata = self._commit(backup_metadata, reason=reason)
 
         logger.info(
             f"Accepted new data as baseline: {backup_key}"
@@ -448,14 +549,12 @@ class ParquetStorage(StorageBackend):
             Metadata for the new baseline
 
         Raises:
-            StorageError: If the latest backup changed since
+            BaselineChangedError: If the latest backup changed since
                 ``expected_latest`` was read
         """
-        created_at = datetime.now()
-        if expected_latest is not None and expected_latest.created_at >= created_at:
-            # Clock went backwards or the latest backup is future-dated; the
-            # restored baseline must still sort after it to become the latest.
-            created_at = expected_latest.created_at + timedelta(microseconds=1)
+        # Even if the clock went backwards or the latest backup is
+        # future-dated, the restored baseline must sort after it.
+        created_at = self._next_created_at(expected_latest)
 
         extra_metadata = {b"restored_from_patch": patch_id.encode()}
         if reason:
@@ -464,19 +563,12 @@ class ParquetStorage(StorageBackend):
         backup_metadata = self._write_backup(
             backup_key, dataset, data, content_hash, created_at, extra_metadata
         )
-
-        try:
-            _fsync_file(backup_metadata.file_path)
-            added = self.index.add_if_latest(
-                backup_metadata, expected_latest, reason=reason
-            )
-        except Exception:
-            backup_metadata.file_path.unlink(missing_ok=True)
-            raise
-
-        if not added:
-            backup_metadata.file_path.unlink(missing_ok=True)
-            raise StorageError(f"Latest backup of {backup_key} changed during restore")
+        backup_metadata = self._commit(
+            backup_metadata,
+            reason=reason,
+            expected_latest=expected_latest,
+            fsync=True,
+        )
 
         logger.info(
             f"Restored baseline from patch {patch_id}: {backup_key}"

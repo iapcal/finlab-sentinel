@@ -1,11 +1,14 @@
 """Tests for storage backend."""
 
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 import pandas as pd
+import pyarrow.parquet as pq
 import pytest
 
+from finlab_sentinel.exceptions import StorageError
 from finlab_sentinel.storage.backend import BackupMetadata
 from finlab_sentinel.storage.parquet import ParquetStorage, sanitize_backup_key
 
@@ -503,7 +506,8 @@ class TestBackupIndex:
             file_path=latest.file_path.with_name("new.parquet"),
         )
 
-        assert parquet_storage.index.add_if_latest(new, latest, reason="r") is True
+        added = parquet_storage.index.add_if_latest(new, latest, reason="r")
+        assert added == new
         assert parquet_storage.get_latest_metadata("cas") == new
 
     def test_add_if_latest_refuses_when_latest_changed(
@@ -522,7 +526,7 @@ class TestBackupIndex:
             file_path=concurrent.file_path.with_name("new.parquet"),
         )
 
-        assert parquet_storage.index.add_if_latest(new, expected) is False
+        assert parquet_storage.index.add_if_latest(new, expected) is None
         assert parquet_storage.get_latest_metadata("cas") == concurrent
         assert len(parquet_storage.list_backups("cas")) == 2
 
@@ -539,8 +543,8 @@ class TestBackupIndex:
             column_count=1,
             file_path=parquet_storage._get_backup_dir("cas") / "new.parquet",
         )
-        assert parquet_storage.index.add_if_latest(new, None) is True
-        assert parquet_storage.index.add_if_latest(new, None) is False
+        assert parquet_storage.index.add_if_latest(new, None) == new
+        assert parquet_storage.index.add_if_latest(new, None) is None
 
     def test_load_backup_missing_file_returns_none(
         self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
@@ -686,7 +690,7 @@ class TestSameSecondWrites:
 
         assert first.file_path != second.file_path
         assert first.file_path.name == "2026-09-30T08-22-05.parquet"
-        assert second.file_path.name == "2026-09-30T08-22-05-200000.parquet"
+        assert second.file_path.name == "2026-09-30T08-22-05_200000.parquet"
         pd.testing.assert_frame_equal(self._stored(first), sample_df, check_freq=False)
         pd.testing.assert_frame_equal(
             self._stored(second), sample_df_modified, check_freq=False
@@ -744,12 +748,13 @@ class TestSameSecondWrites:
         backup_dir = parquet_storage._get_backup_dir("taken")
         backup_dir.mkdir(parents=True)
         (backup_dir / "2026-09-30T08-22-05.parquet").write_bytes(b"x")
-        (backup_dir / "2026-09-30T08-22-05-100000.parquet").write_bytes(b"x")
+        (backup_dir / "2026-09-30T08-22-05_100000.parquet").write_bytes(b"x")
 
-        path = parquet_storage._new_backup_file("taken", self.T1)
+        path = parquet_storage._claim_backup_file("taken", self.T1)
 
-        assert path.name == "2026-09-30T08-22-05-100000_2.parquet"
-        assert not path.exists()
+        assert path.name == "2026-09-30T08-22-05_100000_2.parquet"
+        assert path.read_bytes() == b""  # claimed, not yet written
+        assert (backup_dir / "2026-09-30T08-22-05.parquet").read_bytes() == b"x"
 
     def test_failed_write_leaves_no_file(
         self, parquet_storage: ParquetStorage, sample_df, monkeypatch
@@ -868,3 +873,148 @@ class TestSharedBackupFiles:
         loaded, metadata = original.load_latest("ds")
         assert metadata.content_hash == "hash2"
         pd.testing.assert_frame_equal(loaded, sample_df_modified, check_freq=False)
+
+
+class TestBackupWrites:
+    """New backups get their own file and sort after every older backup."""
+
+    T = datetime(2026, 9, 30, 19, 0, 0, 100)
+
+    def test_interleaved_writers_get_separate_files(
+        self,
+        parquet_storage: ParquetStorage,
+        sample_df,
+        sample_df_modified,
+        monkeypatch,
+    ):
+        """A writer never reuses the file another writer is still writing."""
+        import finlab_sentinel.storage.parquet as parquet_module
+
+        _freeze_now(
+            monkeypatch,
+            "finlab_sentinel.storage.parquet",
+            self.T,
+            self.T + timedelta(microseconds=800),
+        )
+        real_write = parquet_module.pq.write_table
+        calls = []
+
+        def interleaved(table, where, **kwargs):
+            calls.append(where)
+            if len(calls) == 1:
+                # A second writer saves while the first one is writing
+                parquet_storage.save("k", "test", sample_df_modified, "hash_b")
+            return real_write(table, where, **kwargs)
+
+        monkeypatch.setattr(parquet_module.pq, "write_table", interleaved)
+        parquet_storage.save("k", "test", sample_df, "hash_a")
+        monkeypatch.undo()
+
+        backups = parquet_storage.list_backups("k")
+        assert len({b.file_path for b in backups}) == 2
+        for backup in backups:
+            stored = pq.read_table(backup.file_path).schema.metadata
+            assert stored[b"content_hash"] == backup.content_hash.encode()
+        # The writer that finished last is the latest
+        assert parquet_storage.get_latest_metadata("k").content_hash == "hash_a"
+
+    def test_repeated_clock_readings_do_not_collide(
+        self, parquet_storage: ParquetStorage, sample_df, monkeypatch
+    ):
+        """A coarse clock that repeats the same time must not break writes."""
+
+        class CoarseDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 9, 30, 19, 0, 0, tzinfo=tz)
+
+        monkeypatch.setattr("finlab_sentinel.storage.parquet.datetime", CoarseDatetime)
+
+        written = [
+            parquet_storage.save("coarse", "test", sample_df, f"hash{i}")
+            for i in range(3)
+        ]
+        written.append(
+            parquet_storage.accept_new_data("coarse", sample_df, "accepted", "test")
+        )
+
+        times = [m.created_at for m in written]
+        assert times == sorted(times)
+        assert len(set(times)) == len(written)
+        assert len({m.file_path for m in written}) == len(written)
+        assert parquet_storage.get_latest_metadata("coarse") == written[-1]
+
+    def test_accept_sorts_after_future_dated_latest(
+        self, parquet_storage: ParquetStorage, sample_df
+    ):
+        """After the clock went backwards an accept still becomes the latest."""
+        parquet_storage.save("skew", "test", sample_df, "hash1")
+        future = datetime.now() + timedelta(days=1)
+        with parquet_storage.index._connect() as conn:
+            conn.execute(
+                "UPDATE backups SET created_at = ? WHERE content_hash = ?",
+                (future.isoformat(), "hash1"),
+            )
+
+        accepted = parquet_storage.accept_new_data("skew", sample_df, "hash2", "test")
+
+        assert accepted.created_at > future
+        assert parquet_storage.get_latest_metadata("skew") == accepted
+
+    def test_add_latest_moves_colliding_timestamp(
+        self, parquet_storage: ParquetStorage, sample_df
+    ):
+        """The index itself never lets a new entry collide with the latest."""
+        first = parquet_storage.save("tie", "test", sample_df, "hash1")
+        tie = replace(
+            first,
+            content_hash="hash2",
+            file_path=first.file_path.with_name("tie.parquet"),
+        )
+
+        added = parquet_storage.index.add_latest(tie)
+
+        assert added.created_at == first.created_at + timedelta(microseconds=1)
+        assert parquet_storage.get_latest_metadata("tie") == added
+
+    def test_index_failure_leaves_no_file(
+        self, parquet_storage: ParquetStorage, sample_df, monkeypatch
+    ):
+        """A file whose index entry cannot be added is removed again."""
+        import sqlite3
+
+        from finlab_sentinel.storage.index import BackupIndex
+
+        def broken_add_latest(self, metadata, reason=None):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(BackupIndex, "add_latest", broken_add_latest)
+
+        with pytest.raises(sqlite3.OperationalError):
+            parquet_storage.save("orphan", "test", sample_df, "hash1")
+        with pytest.raises(sqlite3.OperationalError):
+            parquet_storage.accept_new_data("orphan", sample_df, "hash1", "test")
+
+        assert list(parquet_storage._get_backup_dir("orphan").iterdir()) == []
+
+    def test_backup_records_package_version(
+        self, parquet_storage: ParquetStorage, sample_df
+    ):
+        """The parquet metadata carries the running package version."""
+        import finlab_sentinel
+
+        metadata = parquet_storage.save("ver", "test", sample_df, "hash1")
+
+        stored = pq.read_table(metadata.file_path).schema.metadata
+        assert stored[b"sentinel_version"] == finlab_sentinel.__version__.encode()
+
+    @pytest.mark.parametrize("key", ["", ".", "..", "../evil", "a/b"])
+    def test_invalid_backup_key_is_rejected(
+        self, parquet_storage: ParquetStorage, sample_df, tmp_storage, key
+    ):
+        """Keys that are not a single path component never reach the disk."""
+        with pytest.raises(StorageError, match="Invalid backup key"):
+            parquet_storage.save(key, "test", sample_df, "hash1")
+
+        assert not (tmp_storage / "data" / "evil").exists()
+        assert parquet_storage.list_backups() == []

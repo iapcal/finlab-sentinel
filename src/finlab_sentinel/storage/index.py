@@ -6,7 +6,8 @@ import logging
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from finlab_sentinel.storage.backend import BackupMetadata
@@ -102,17 +103,39 @@ class BackupIndex:
             self._insert(conn, metadata, reason)
         logger.debug(f"Added backup to index: {metadata.backup_key}")
 
+    def add_latest(
+        self, metadata: BackupMetadata, reason: str | None = None
+    ) -> BackupMetadata:
+        """Add backup metadata as the key's latest entry.
+
+        If an entry of the key has the same or a later ``created_at`` (a
+        coarse or skewed clock, or a concurrent writer), the new entry's
+        ``created_at`` is moved just after it, within the same write
+        transaction, so it never collides with or sorts before an older one.
+
+        Args:
+            metadata: Backup metadata to add
+            reason: Optional reason (for accepted data)
+
+        Returns:
+            The metadata as added
+        """
+        added = self._add_after_latest(metadata, reason, check=False)
+        assert added is not None  # only a compare-and-swap can refuse
+        return added
+
     def add_if_latest(
         self,
         metadata: BackupMetadata,
         expected_latest: BackupMetadata | None,
         reason: str | None = None,
-    ) -> bool:
+    ) -> BackupMetadata | None:
         """Add backup metadata only if the key's latest backup is unchanged.
 
         The check and the insert run in a single write transaction, so a
         backup saved concurrently by another process is never silently
-        superseded.
+        superseded. The whole latest entry is compared, not just its hash.
+        Like add_latest, the entry's ``created_at`` is moved forward if needed.
 
         Args:
             metadata: Backup metadata to add
@@ -121,9 +144,20 @@ class BackupIndex:
             reason: Optional reason stored with the entry
 
         Returns:
-            True if added, False if the latest backup differs from
+            The metadata as added, or None if the latest backup differs from
             ``expected_latest`` (nothing is written)
         """
+        return self._add_after_latest(
+            metadata, reason, check=True, expected_latest=expected_latest
+        )
+
+    def _add_after_latest(
+        self,
+        metadata: BackupMetadata,
+        reason: str | None,
+        check: bool,
+        expected_latest: BackupMetadata | None = None,
+    ) -> BackupMetadata | None:
         with self._connect() as conn:
             # Take the write lock before reading so check and insert are atomic
             conn.execute("BEGIN IMMEDIATE")
@@ -137,14 +171,19 @@ class BackupIndex:
                 (metadata.backup_key,),
             ).fetchone()
             current = self._row_to_metadata(row) if row is not None else None
-            if current != expected_latest:
+            if check and current != expected_latest:
                 logger.debug(
                     f"Latest backup changed for {metadata.backup_key}, not adding"
                 )
-                return False
+                return None
+            if current is not None and metadata.created_at <= current.created_at:
+                metadata = replace(
+                    metadata,
+                    created_at=current.created_at + timedelta(microseconds=1),
+                )
             self._insert(conn, metadata, reason)
         logger.debug(f"Added backup to index: {metadata.backup_key}")
-        return True
+        return metadata
 
     def get_latest(self, backup_key: str) -> BackupMetadata | None:
         """Get most recent backup metadata for a key.
