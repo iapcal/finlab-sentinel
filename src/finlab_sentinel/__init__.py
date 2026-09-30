@@ -157,7 +157,8 @@ def restore_patch(
     The patch's data and content hash become the dataset's baseline again,
     exactly as before the accept that created the patch. The replaced
     baseline is saved as a new patch (see ``RestoreResult.new_patch_id``), so
-    the restore can itself be restored; the source patch is kept.
+    the restore can itself be restored; the source patch is kept. Do not
+    restore a dataset while a sentinel-enabled process may be using it.
 
     Args:
         patch_id: The patch identifier (see list_patches)

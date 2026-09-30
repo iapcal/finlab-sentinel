@@ -296,19 +296,48 @@ class ParquetStorage(StorageBackend):
             )
         return added
 
+    def _latest_for(
+        self, backup_key: str, expected_latest: BackupMetadata | None | _Unset
+    ) -> BackupMetadata | None:
+        """The latest backup a new one must sort after."""
+        if expected_latest is UNSET:
+            return self.index.get_latest(backup_key)
+        return expected_latest
+
     def save(
         self,
         backup_key: str,
         dataset: str,
         data: pd.DataFrame,
         content_hash: str,
+        *,
+        expected_latest: BackupMetadata | None | _Unset = UNSET,
     ) -> BackupMetadata:
-        """Save DataFrame to Parquet storage."""
-        created_at = self._next_created_at(self.index.get_latest(backup_key))
+        """Save DataFrame to Parquet storage.
+
+        Args:
+            backup_key: The backup key
+            dataset: Original dataset name
+            data: DataFrame to save
+            content_hash: Pre-computed content hash
+            expected_latest: If given, save only if this is still the key's
+                latest backup (None: only if the key has no backups), so a
+                baseline written concurrently is never superseded
+
+        Returns:
+            Metadata for the saved backup
+
+        Raises:
+            BaselineChangedError: If the latest backup is no longer
+                ``expected_latest`` (nothing is written)
+        """
+        created_at = self._next_created_at(
+            self._latest_for(backup_key, expected_latest)
+        )
         backup_metadata = self._write_backup(
             backup_key, dataset, data, content_hash, created_at
         )
-        backup_metadata = self._commit(backup_metadata)
+        backup_metadata = self._commit(backup_metadata, expected_latest=expected_latest)
 
         logger.info(
             f"Saved backup: {backup_key} ({len(data)} rows, "
@@ -488,13 +517,34 @@ class ParquetStorage(StorageBackend):
         content_hash: str,
         dataset: str,
         reason: str | None = None,
+        *,
+        expected_latest: BackupMetadata | None | _Unset = UNSET,
     ) -> BackupMetadata:
-        """Accept new data as the baseline."""
+        """Accept new data as the baseline.
+
+        Args:
+            backup_key: The backup key
+            data: New DataFrame to accept
+            content_hash: Content hash of new data
+            dataset: Original dataset name
+            reason: Optional reason for accepting
+            expected_latest: If given, accept only if this is still the key's
+                latest backup (compare-and-swap)
+
+        Returns:
+            Metadata for the new baseline
+
+        Raises:
+            BaselineChangedError: If the latest backup is no longer
+                ``expected_latest`` (nothing is written)
+        """
         extra_metadata = {b"accepted": b"true"}
         if reason:
             extra_metadata[b"accepted_reason"] = reason.encode()
 
-        created_at = self._next_created_at(self.index.get_latest(backup_key))
+        created_at = self._next_created_at(
+            self._latest_for(backup_key, expected_latest)
+        )
         backup_metadata = self._write_backup(
             backup_key,
             dataset,
@@ -505,7 +555,9 @@ class ParquetStorage(StorageBackend):
         )
 
         # Add to index with reason
-        backup_metadata = self._commit(backup_metadata, reason=reason)
+        backup_metadata = self._commit(
+            backup_metadata, reason=reason, expected_latest=expected_latest
+        )
 
         logger.info(
             f"Accepted new data as baseline: {backup_key}"

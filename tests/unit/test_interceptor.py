@@ -883,3 +883,91 @@ class TestAcceptCurrentDataWithPreprocessHook:
 
         stored, _ = storage.load_latest(backup_key)
         pd.testing.assert_frame_equal(stored, new_df)
+
+
+class TestBaselineWriteRaces:
+    """Baseline writes never supersede a baseline they did not compare against."""
+
+    def test_first_save_does_not_overwrite_concurrent_first_save(
+        self, config_for_interceptor: SentinelConfig, caplog
+    ):
+        """Two processes saving a first baseline: the later one backs off."""
+        import logging
+
+        from finlab_sentinel.storage.parquet import ParquetStorage
+
+        mine = pd.DataFrame({"a": [1, 2, 3]})
+        theirs = pd.DataFrame({"a": [7, 8, 9]})
+        interceptor = DataInterceptor(
+            MagicMock(return_value=mine), config_for_interceptor
+        )
+        other = ParquetStorage(base_path=config_for_interceptor.get_storage_path())
+        real_get_latest = interceptor.storage.get_latest_metadata
+
+        def get_latest_then_race(backup_key):
+            latest = real_get_latest(backup_key)
+            # Another process saves a baseline right after this one looked
+            other.save(backup_key, "test:dataset", theirs, "their-hash")
+            return latest
+
+        interceptor.storage.get_latest_metadata = get_latest_then_race
+        with caplog.at_level(logging.WARNING, logger="finlab_sentinel"):
+            result = interceptor("test:dataset")
+
+        pd.testing.assert_frame_equal(result, mine)
+        backups = other.list_backups("test__dataset")
+        assert [b.content_hash for b in backups] == ["their-hash"]
+        assert "changed while data.get compared" in caplog.text
+
+    def test_missing_baseline_file_is_replaced(
+        self, config_for_interceptor: SentinelConfig, mock_data_get
+    ):
+        """A latest entry whose file is gone does not block a new baseline."""
+        interceptor = DataInterceptor(mock_data_get, config_for_interceptor)
+        interceptor("test:dataset")
+        storage = interceptor.storage
+        storage.get_latest_metadata("test__dataset").file_path.unlink()
+
+        interceptor("test:dataset")
+
+        assert len(storage.list_backups("test__dataset")) == 2
+        assert storage.load_latest("test__dataset") is not None
+
+    def test_accept_does_not_overwrite_concurrent_baseline(
+        self, config_for_interceptor: SentinelConfig
+    ):
+        """A baseline saved while accepting wins; the accept changes nothing."""
+        import sys
+        from types import ModuleType
+
+        from finlab_sentinel.comparison.hasher import ContentHasher
+        from finlab_sentinel.storage.parquet import ParquetStorage, sanitize_backup_key
+        from finlab_sentinel.storage.patches import PatchStore
+
+        storage = ParquetStorage(base_path=config_for_interceptor.get_storage_path())
+        backup_key = sanitize_backup_key("test:dataset")
+        old_df = pd.DataFrame({"a": [1, 2, 3]})
+        storage.save(
+            backup_key, "test:dataset", old_df, ContentHasher().hash_dataframe(old_df)
+        )
+
+        def fetch_while_other_saves(dataset, *args, **kwargs):
+            # data.get in another process saves a baseline meanwhile
+            storage.save(
+                backup_key, dataset, pd.DataFrame({"a": [1, 2, 3, 4]}), "concurrent"
+            )
+            return pd.DataFrame({"a": [9, 9, 9]})
+
+        mock_data = MagicMock()
+        mock_data.get = MagicMock(side_effect=fetch_while_other_saves)
+        mock_finlab = ModuleType("finlab")
+        mock_finlab.data = mock_data
+        sys.modules["finlab"] = mock_finlab
+        try:
+            assert accept_current_data("test:dataset", config_for_interceptor) is False
+        finally:
+            del sys.modules["finlab"]
+
+        assert storage.get_latest_metadata(backup_key).content_hash == "concurrent"
+        patch_store = PatchStore(base_path=config_for_interceptor.get_storage_path())
+        assert patch_store.list_patches() == []

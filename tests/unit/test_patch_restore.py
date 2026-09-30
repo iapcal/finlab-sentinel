@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 import sys
 from datetime import datetime, timedelta
@@ -613,3 +614,89 @@ class TestPublicAPI:
 
         with pytest.raises(fs.PatchNotFoundError):
             fs.restore_patch("nonexistent__2026-01-01T00-00-00", config)
+
+
+class TestConcurrentWrites:
+    """Restore and data.get never supersede a baseline they did not read."""
+
+    def test_data_get_does_not_overwrite_concurrent_restore(
+        self, config, finlab_frames, caplog
+    ):
+        """A restore committed while data.get compares stays the baseline."""
+        original = _price_frame()
+        patch_meta = _baseline_then_accept(config, finlab_frames, original)
+        accepted = _revised(original)
+        # Today's data: the accepted revision plus one new day (in policy)
+        next_day = accepted.index[-1] + pd.Timedelta(days=1)
+        finlab_frames[DATASET] = pd.concat(
+            [accepted, accepted.iloc[[-1]].set_axis([next_day])]
+        )
+        interceptor = DataInterceptor(
+            lambda ds, *a, **k: finlab_frames[ds].copy(), config
+        )
+        real_compare = interceptor.comparer.compare
+
+        def compare_then_restore(old, new):
+            # The user restores the patch while data.get is comparing
+            restore_patch(patch_meta.patch_id, config)
+            return real_compare(old, new)
+
+        interceptor.comparer.compare = compare_then_restore
+        with caplog.at_level(logging.WARNING, logger="finlab_sentinel"):
+            interceptor(DATASET)
+
+        latest = _storage(config).get_latest_metadata(KEY)
+        assert latest.content_hash == patch_meta.old_hash
+        assert "changed while data.get compared" in caplog.text
+
+    def test_restore_holds_write_lock_between_check_and_insert(
+        self, config, finlab_frames, monkeypatch
+    ):
+        """No other writer can slip in between the latest check and insert."""
+        patch_meta = _baseline_then_accept(config, finlab_frames, _price_frame())
+        index_path = config.get_storage_path() / "data" / "index.sqlite"
+        real_row_to_metadata = BackupIndex._row_to_metadata
+        real_add_if_latest = BackupIndex.add_if_latest
+        state: dict[str, object] = {"armed": False}
+
+        def racing_row_to_metadata(row):
+            if state["armed"]:
+                state["armed"] = False
+                conn = sqlite3.connect(index_path, timeout=0.1)
+                try:
+                    conn.execute(
+                        "INSERT INTO backups (backup_key, dataset, file_path,"
+                        " content_hash, created_at, row_count, column_count,"
+                        " file_size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            KEY,
+                            DATASET,
+                            "/elsewhere/concurrent.parquet",
+                            "concurrent",
+                            datetime.now().isoformat(),
+                            1,
+                            1,
+                            1,
+                        ),
+                    )
+                    conn.commit()
+                    state["competing"] = "committed"
+                except sqlite3.OperationalError as e:
+                    state["competing"] = str(e)
+                finally:
+                    conn.close()
+            return real_row_to_metadata(row)
+
+        def armed_add_if_latest(self, *args, **kwargs):
+            state["armed"] = True
+            return real_add_if_latest(self, *args, **kwargs)
+
+        monkeypatch.setattr(
+            BackupIndex, "_row_to_metadata", staticmethod(racing_row_to_metadata)
+        )
+        monkeypatch.setattr(BackupIndex, "add_if_latest", armed_add_if_latest)
+
+        result = restore_patch(patch_meta.patch_id, config)
+
+        assert state["competing"] == "database is locked"
+        assert _storage(config).get_latest_metadata(KEY) == result.baseline

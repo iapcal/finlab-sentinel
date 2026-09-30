@@ -8,7 +8,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 import pytest
 
-from finlab_sentinel.exceptions import StorageError
+from finlab_sentinel.exceptions import BaselineChangedError, StorageError
 from finlab_sentinel.storage.backend import BackupMetadata
 from finlab_sentinel.storage.parquet import ParquetStorage, sanitize_backup_key
 
@@ -545,6 +545,62 @@ class TestBackupIndex:
         )
         assert parquet_storage.index.add_if_latest(new, None) == new
         assert parquet_storage.index.add_if_latest(new, None) is None
+
+    def test_add_if_latest_compares_whole_entry(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
+        """An entry with the same content hash is still a different baseline."""
+        expected = parquet_storage.save("cas", "test", sample_df, "same-hash")
+        # e.g. an accept of data with an identical hash
+        parquet_storage.accept_new_data("cas", sample_df, "same-hash", "test")
+        new = BackupMetadata(
+            dataset="test",
+            backup_key="cas",
+            content_hash="other",
+            created_at=datetime.now() + timedelta(days=1),
+            row_count=1,
+            column_count=1,
+            file_path=expected.file_path.with_name("new.parquet"),
+        )
+
+        assert parquet_storage.index.add_if_latest(new, expected) is None
+
+    def test_writes_with_stale_expected_latest_write_nothing(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
+        """save/accept_new_data refuse to supersede a baseline they did not read."""
+        expected = parquet_storage.save("cas", "test", sample_df, "hash1")
+        concurrent = parquet_storage.save("cas", "test", sample_df, "hash2")
+
+        with pytest.raises(BaselineChangedError):
+            parquet_storage.save(
+                "cas", "test", sample_df, "hash3", expected_latest=expected
+            )
+        with pytest.raises(BaselineChangedError):
+            parquet_storage.accept_new_data(
+                "cas", sample_df, "hash3", "test", expected_latest=expected
+            )
+        with pytest.raises(BaselineChangedError):
+            parquet_storage.save(
+                "cas", "test", sample_df, "hash4", expected_latest=None
+            )
+
+        assert parquet_storage.get_latest_metadata("cas") == concurrent
+        backup_files = set(parquet_storage._get_backup_dir("cas").iterdir())
+        assert backup_files == {expected.file_path, concurrent.file_path}
+
+    def test_writes_with_current_expected_latest_succeed(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
+        """expected_latest=None succeeds for a new key; a current one succeeds."""
+        first = parquet_storage.save(
+            "fresh", "test", sample_df, "h1", expected_latest=None
+        )
+        second = parquet_storage.accept_new_data(
+            "fresh", sample_df, "h2", "test", expected_latest=first
+        )
+
+        assert parquet_storage.get_latest_metadata("fresh") == second
 
     def test_load_backup_missing_file_returns_none(
         self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame

@@ -322,7 +322,8 @@ preview = fs.restore_patch("price__收盤價__2026-07-11T10-30-00", dry_run=True
 - **來源 patch 會保留**：還原不會消耗或刪除 patch，同一個 patch 可以重複使用；若 baseline 已與 patch 相同（hash 與資料皆一致）則不寫入任何東西，重複執行是安全的。
 - **content hash 原樣還原、不重新計算**：baseline 的 hash 是 `data.get` 攔截時對 preprocess hook 處理後的資料計算的，還原時直接沿用 patch 記錄的值，所以在沒有註冊 hook 的 CLI 中還原也正確。
 - **Retention**：還原後的 baseline 是還原當下建立的一般備份，retention 清理對待它的方式與剛存入的 baseline 相同；accept 與還原之前的備份仍留在歷史中（時間旅行查得到），照一般規則過期。
-- **不會讓資料源失去 baseline**：新檔案完整寫入並 flush 到磁碟後才更新索引；若過程中 baseline 被其他程序更新、或任何一步失敗，還原會中止並拋出 `PatchRestoreError`（CLI 回傳 1），原本的 baseline 保持不變，也不留下半成品。
+- **不會讓資料源失去 baseline**：新檔案完整寫入並 flush 到磁碟後才更新索引；任何一步失敗，還原會中止並拋出 `PatchRestoreError`（CLI 回傳 1），原本的 baseline 保持不變，也不留下半成品。
+- **不要在啟用 sentinel 的程序執行中還原（或 accept）同一個資料源**：寫入 baseline 時一律檢查最新的 baseline 仍是當初讀到的那一個（compare-and-swap），所以兩邊都不會覆蓋對方——還原途中 baseline 被改動時還原會中止；`data.get` 比對到一半時 baseline 被還原，它不會存檔覆蓋（只記錄警告），下次 `data.get` 才以還原後的 baseline 比對。但那個執行中的程序已經拿到、並依舊 baseline 驗證過的資料不會因此改變，所以請等它結束再還原。
 - 資料源目前沒有 baseline 時，patch 資料直接成為 baseline（沒有東西需要另存）；patch 不存在時拋出 `PatchNotFoundError`（CLI 回傳 1），不做任何變更。
 
 ### 關閉自動建立

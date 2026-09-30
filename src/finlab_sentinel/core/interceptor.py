@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 from collections.abc import Callable
@@ -17,8 +18,9 @@ from finlab_sentinel.comparison.report import AnomalyReport
 from finlab_sentinel.config.schema import SentinelConfig
 from finlab_sentinel.core.hooks import get_registry as get_preprocess_registry
 from finlab_sentinel.core.time_travel import TimeTravelContext
-from finlab_sentinel.exceptions import NoHistoricalDataError
+from finlab_sentinel.exceptions import BaselineChangedError, NoHistoricalDataError
 from finlab_sentinel.handlers.callback import create_handler_from_config
+from finlab_sentinel.storage.backend import BackupMetadata
 from finlab_sentinel.storage.parquet import ParquetStorage, sanitize_backup_key
 
 logger = logging.getLogger(__name__)
@@ -111,15 +113,21 @@ class DataInterceptor:
         new_hash = self.hasher.hash_dataframe(new_data_for_comparison)
 
         # 5. Check for existing backup (stored data is raw/original)
-        cached = self.storage.load_latest(backup_key)
+        cached_metadata = self.storage.get_latest_metadata(backup_key)
+        cached_data = (
+            self.storage.load_backup(cached_metadata)
+            if cached_metadata is not None
+            else None
+        )
 
-        if cached is None:
-            # First time - save original data as baseline (not preprocessed)
+        if cached_metadata is None or cached_data is None:
+            # First time (or baseline file missing) - save original data as
+            # baseline (not preprocessed)
             logger.info(f"First backup for {dataset}, saving as baseline")
-            self.storage.save(backup_key, dataset, original_data, new_hash)
+            self._save_baseline(
+                backup_key, dataset, original_data, new_hash, cached_metadata
+            )
             return original_data
-
-        cached_data, cached_metadata = cached
 
         # 6. Quick comparison via hash
         if new_hash == cached_metadata.content_hash:
@@ -152,7 +160,9 @@ class DataInterceptor:
                 f"Changes accepted for {dataset}: {result.summary()} "
                 f"[{policy.name} policy]"
             )
-            self.storage.save(backup_key, dataset, original_data, new_hash)
+            self._save_baseline(
+                backup_key, dataset, original_data, new_hash, cached_metadata
+            )
             return original_data
 
         # 9. Policy violation - create report
@@ -177,6 +187,38 @@ class DataInterceptor:
         # Both cached_data and original_data are raw/original data
         # Preprocess is only applied during comparison
         return self.handler.handle(report, cached_data, original_data)
+
+    def _save_baseline(
+        self,
+        backup_key: str,
+        dataset: str,
+        data: pd.DataFrame,
+        content_hash: str,
+        compared_to: BackupMetadata | None,
+    ) -> None:
+        """Save data as the new baseline unless the baseline changed meanwhile.
+
+        Only the backup this call compared against is replaced (None: only
+        if there was none). A baseline written in the meantime, e.g. by an
+        accept or a patch restore, is never overwritten with data that was
+        validated against the old one; the next data.get compares against it.
+
+        Args:
+            backup_key: The backup key
+            dataset: Dataset name
+            data: Original (not preprocessed) data to save
+            content_hash: Hash of the preprocessed data
+            compared_to: The latest backup read before comparing
+        """
+        try:
+            self.storage.save(
+                backup_key, dataset, data, content_hash, expected_latest=compared_to
+            )
+        except BaselineChangedError:
+            logger.warning(
+                f"Baseline of {dataset} changed while data.get compared against "
+                f"it (e.g. by an accept or patch restore); not replacing it"
+            )
 
     def _generate_backup_key(self, dataset: str) -> str:
         """Generate unique key for backup storage.
@@ -331,10 +373,15 @@ def accept_current_data(
 
     # Create permanent patch preserving old baseline before it's superseded.
     # Patch failure must not block the accept itself.
+    from finlab_sentinel.storage.patches import PatchMetadata, PatchStore
+
+    patch_store = PatchStore(
+        base_path=config.get_storage_path(),
+        compression=config.storage.compression,
+    )
+    patch_metadata: PatchMetadata | None = None
     if config.accept.create_patch and new_hash != cached_metadata.content_hash:
         try:
-            from finlab_sentinel.storage.patches import PatchStore
-
             comparer = DataFrameComparer(
                 rtol=config.comparison.rtol,
                 atol=config.comparison.atol,
@@ -344,10 +391,6 @@ def accept_current_data(
             cached_for_comparison = preprocess_registry.apply(dataset, cached_data)
             result = comparer.compare(cached_for_comparison, new_data_for_comparison)
 
-            patch_store = PatchStore(
-                base_path=config.get_storage_path(),
-                compression=config.storage.compression,
-            )
             patch_metadata = patch_store.create(
                 dataset=dataset,
                 backup_key=backup_key,
@@ -364,13 +407,23 @@ def accept_current_data(
                 f"Accept will proceed without a patch."
             )
 
-    storage.accept_new_data(
-        backup_key=backup_key,
-        data=new_data,
-        content_hash=new_hash,
-        dataset=dataset,
-        reason=reason,
-    )
+    # Only replace the baseline read above; a baseline written meanwhile (by
+    # data.get or a patch restore) is never superseded by this accept.
+    try:
+        storage.accept_new_data(
+            backup_key=backup_key,
+            data=new_data,
+            content_hash=new_hash,
+            dataset=dataset,
+            reason=reason,
+            expected_latest=cached_metadata,
+        )
+    except BaselineChangedError:
+        logger.error(f"Baseline of {dataset} changed while accepting; not accepted")
+        if patch_metadata is not None:
+            with contextlib.suppress(Exception):
+                patch_store.delete(patch_metadata.patch_id)
+        return False
 
     logger.info(
         f"Accepted new data for {dataset}" + (f" (reason: {reason})" if reason else "")

@@ -395,6 +395,13 @@ def restore_patch(
     Restoring is idempotent: if the baseline already equals the patch,
     nothing is written.
 
+    Do not restore a dataset while a sentinel-enabled process may be using
+    it. Baseline writes are compare-and-swap, so neither side overwrites the
+    other (this restore aborts if the baseline changes underneath it, and a
+    data.get that compared against the old baseline does not save over the
+    restored one), but such a process keeps the data it already validated
+    against the old baseline.
+
     Args:
         patch_id: The patch identifier (see list_patches)
         config: Optional configuration (uses default if not provided)
