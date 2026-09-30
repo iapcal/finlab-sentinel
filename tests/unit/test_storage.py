@@ -4,6 +4,7 @@ import time
 from datetime import datetime, timedelta
 
 import pandas as pd
+import pytest
 
 from finlab_sentinel.storage.parquet import ParquetStorage, sanitize_backup_key
 
@@ -577,3 +578,127 @@ class TestBackupIndex:
         assert stats["total_backups"] >= 1
         assert stats["unique_datasets"] >= 1
         assert stats["total_size_bytes"] >= 0
+
+
+def _freeze_now(monkeypatch, module: str, *instants: datetime) -> None:
+    """Make ``datetime.now()`` in ``module`` return ``instants`` in order."""
+    times = iter(instants)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return next(times).replace(tzinfo=tz)
+
+    monkeypatch.setattr(f"{module}.datetime", FrozenDatetime)
+
+
+class TestSameSecondWrites:
+    """Backups written within the same second must not share a file."""
+
+    T1 = datetime(2026, 9, 30, 8, 22, 5, 100000)
+    T2 = datetime(2026, 9, 30, 8, 22, 5, 200000)  # same second as T1
+
+    @staticmethod
+    def _stored(metadata) -> pd.DataFrame:
+        import pyarrow.parquet as pq
+
+        return pq.read_table(metadata.file_path).to_pandas()
+
+    def test_same_second_saves_keep_separate_files(
+        self,
+        parquet_storage: ParquetStorage,
+        sample_df,
+        sample_df_modified,
+        monkeypatch,
+    ):
+        """A second save in the same second must not overwrite the first."""
+        _freeze_now(monkeypatch, "finlab_sentinel.storage.parquet", self.T1, self.T2)
+
+        first = parquet_storage.save("same_sec", "test", sample_df, "hash1")
+        second = parquet_storage.save("same_sec", "test", sample_df_modified, "hash2")
+
+        assert first.file_path != second.file_path
+        assert first.file_path.name == "2026-09-30T08-22-05.parquet"
+        assert second.file_path.name == "2026-09-30T08-22-05-200000.parquet"
+        pd.testing.assert_frame_equal(self._stored(first), sample_df, check_freq=False)
+        pd.testing.assert_frame_equal(
+            self._stored(second), sample_df_modified, check_freq=False
+        )
+
+    def test_same_second_accept_keeps_previous_file(
+        self,
+        parquet_storage: ParquetStorage,
+        sample_df,
+        sample_df_modified,
+        monkeypatch,
+    ):
+        """Accepting right after a save must not overwrite the saved backup."""
+        _freeze_now(monkeypatch, "finlab_sentinel.storage.parquet", self.T1, self.T2)
+
+        saved = parquet_storage.save("same_sec", "test", sample_df, "hash1")
+        accepted = parquet_storage.accept_new_data(
+            "same_sec", sample_df_modified, "hash2", "test", reason="revision"
+        )
+
+        assert saved.file_path != accepted.file_path
+        pd.testing.assert_frame_equal(self._stored(saved), sample_df, check_freq=False)
+        pd.testing.assert_frame_equal(
+            self._stored(accepted), sample_df_modified, check_freq=False
+        )
+
+    def test_cleanup_of_older_backup_keeps_latest_file(
+        self,
+        parquet_storage: ParquetStorage,
+        sample_df,
+        sample_df_modified,
+        monkeypatch,
+    ):
+        """Expiring the older backup must not delete the latest one's data."""
+        _freeze_now(monkeypatch, "finlab_sentinel.storage.parquet", self.T1, self.T2)
+        parquet_storage.save("same_sec", "test", sample_df, "hash1")
+        parquet_storage.save("same_sec", "test", sample_df_modified, "hash2")
+        monkeypatch.undo()
+
+        with parquet_storage.index._connect() as conn:
+            conn.execute(
+                "UPDATE backups SET created_at = ? WHERE content_hash = ?",
+                ((datetime.now() - timedelta(days=30)).isoformat(), "hash1"),
+            )
+        parquet_storage.cleanup_expired(retention_days=7, min_keep_per_key=1)
+
+        result = parquet_storage.load_latest("same_sec")
+        assert result is not None
+        loaded, metadata = result
+        assert metadata.content_hash == "hash2"
+        pd.testing.assert_frame_equal(loaded, sample_df_modified, check_freq=False)
+
+    def test_microsecond_name_taken_adds_counter(self, parquet_storage: ParquetStorage):
+        """Fall back to a numbered name when the precise name is taken too."""
+        backup_dir = parquet_storage._get_backup_dir("taken")
+        backup_dir.mkdir(parents=True)
+        (backup_dir / "2026-09-30T08-22-05.parquet").write_bytes(b"x")
+        (backup_dir / "2026-09-30T08-22-05-100000.parquet").write_bytes(b"x")
+
+        path = parquet_storage._new_backup_file("taken", self.T1)
+
+        assert path.name == "2026-09-30T08-22-05-100000_2.parquet"
+        assert not path.exists()
+
+    def test_failed_write_leaves_no_file(
+        self, parquet_storage: ParquetStorage, sample_df, monkeypatch
+    ):
+        """A write that fails midway leaves neither a file nor an index entry."""
+        import finlab_sentinel.storage.parquet as parquet_module
+
+        def broken_write(table, where, **kwargs):
+            with open(where, "wb") as f:
+                f.write(b"PAR1 partial")
+            raise OSError("disk full")
+
+        monkeypatch.setattr(parquet_module.pq, "write_table", broken_write)
+
+        with pytest.raises(OSError, match="disk full"):
+            parquet_storage.save("broken", "test", sample_df, "hash1")
+
+        assert parquet_storage.list_backups("broken") == []
+        assert list(parquet_storage._get_backup_dir("broken").iterdir()) == []

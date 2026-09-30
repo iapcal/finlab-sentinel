@@ -1024,3 +1024,22 @@ class TestPatchDeleteCommand:
             result = runner.invoke(app, ["patch", "delete", "nonexistent", "--force"])
 
         assert result.exit_code == 1
+
+    def test_delete_rejects_path_outside_patches(
+        self, mock_config: SentinelConfig, patch_store_with_patch
+    ):
+        """Verify patch delete refuses ids that escape the patches directory."""
+        store, _ = patch_store_with_patch
+        storage_path = mock_config.get_storage_path()
+        keep = storage_path / "sentinel.toml"
+        keep.write_text("[storage]\n")
+
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
+            result = runner.invoke(app, ["patch", "delete", "..", "--force"])
+
+        assert result.exit_code == 1
+        assert "not found" in result.stdout.lower()
+        assert keep.exists()
+        assert len(store.list_patches()) == 1

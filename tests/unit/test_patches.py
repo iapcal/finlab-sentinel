@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -194,3 +195,88 @@ class TestPatchStoreDelete:
 
     def test_delete_nonexistent(self, patch_store) -> None:
         assert patch_store.delete("nonexistent__2026-01-01T00-00-00") is False
+
+
+class TestPatchIdAllocation:
+    """Patches created within the same second must not overwrite each other."""
+
+    NOW = datetime(2026, 9, 30, 8, 22, 5)
+
+    def _freeze_now(self, monkeypatch) -> None:
+        now = self.NOW
+
+        class FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now.replace(tzinfo=tz)
+
+        monkeypatch.setattr("finlab_sentinel.storage.patches.datetime", FrozenDatetime)
+
+    def test_same_second_patches_get_unique_ids(
+        self, patch_store, sample_df, sample_df_modified, comparison_result, monkeypatch
+    ) -> None:
+        self._freeze_now(monkeypatch)
+
+        first = _create_patch(patch_store, sample_df, comparison_result, reason="a")
+        second = _create_patch(
+            patch_store, sample_df_modified, comparison_result, reason="b"
+        )
+
+        assert first.patch_id == "price__收盤價__2026-09-30T08-22-05"
+        assert second.patch_id == "price__收盤價__2026-09-30T08-22-05_2"
+        assert patch_store.load_metadata(first.patch_id).reason == "a"
+        assert patch_store.load_metadata(second.patch_id).reason == "b"
+        pd.testing.assert_frame_equal(
+            patch_store.load_old_data(first.patch_id), sample_df, check_freq=False
+        )
+        pd.testing.assert_frame_equal(
+            patch_store.load_old_data(second.patch_id),
+            sample_df_modified,
+            check_freq=False,
+        )
+
+    def test_failed_create_leaves_no_directory(
+        self, patch_store, sample_df, comparison_result, tmp_storage, monkeypatch
+    ) -> None:
+        self._freeze_now(monkeypatch)
+
+        def broken_to_parquet(self, path, **kwargs):
+            Path(path).write_bytes(b"PAR1 partial")
+            raise OSError("disk full")
+
+        with monkeypatch.context() as m:
+            m.setattr(pd.DataFrame, "to_parquet", broken_to_parquet)
+            with pytest.raises(OSError, match="disk full"):
+                _create_patch(patch_store, sample_df, comparison_result)
+
+        assert list((tmp_storage / "patches").iterdir()) == []
+        # The id is free again for the next patch
+        created = _create_patch(patch_store, sample_df, comparison_result)
+        assert created.patch_id == "price__收盤價__2026-09-30T08-22-05"
+
+
+class TestPatchIdValidation:
+    """Patch ids must not resolve outside the patches directory."""
+
+    @pytest.mark.parametrize(
+        "patch_id", ["", ".", "..", "../data", "a/b", "a\\b", "C:evil"]
+    )
+    def test_invalid_ids_are_not_found(self, patch_store, patch_id) -> None:
+        with pytest.raises(PatchNotFoundError):
+            patch_store.load_metadata(patch_id)
+        with pytest.raises(PatchNotFoundError):
+            patch_store.load_old_data(patch_id)
+        assert patch_store.delete(patch_id) is False
+
+    def test_delete_parent_dir_id_deletes_nothing(
+        self, patch_store, sample_df, comparison_result, tmp_storage
+    ) -> None:
+        created = _create_patch(patch_store, sample_df, comparison_result)
+        keep = tmp_storage / "sentinel.toml"
+        keep.write_text("[storage]\n")
+
+        assert patch_store.delete("..") is False
+        assert patch_store.delete("../patches") is False
+
+        assert keep.exists()
+        assert patch_store.load_metadata(created.patch_id) is not None

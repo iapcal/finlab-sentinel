@@ -87,6 +87,85 @@ class ParquetStorage(StorageBackend):
         timestamp = date.strftime("%Y-%m-%dT%H-%M-%S")
         return self._get_backup_dir(backup_key) / f"{timestamp}.parquet"
 
+    def _new_backup_file(self, backup_key: str, date: datetime) -> Path:
+        """Get a path for a new backup file that does not exist yet.
+
+        Several backups of one key can be written within the same second
+        (e.g. a baseline that is saved and then immediately replaced).
+        Reusing the second-level name would overwrite a file an older index
+        entry still points to, and retention cleanup of that entry would
+        later delete the newer baseline's data, so fall back to a
+        microsecond-precision name.
+        """
+        file_path = self._get_backup_file(backup_key, date)
+        if not file_path.exists():
+            return file_path
+
+        stem = date.strftime("%Y-%m-%dT%H-%M-%S-%f")
+        file_path = file_path.with_name(f"{stem}.parquet")
+        counter = 1
+        while file_path.exists():
+            counter += 1
+            file_path = file_path.with_name(f"{stem}_{counter}.parquet")
+        return file_path
+
+    def _write_backup(
+        self,
+        backup_key: str,
+        dataset: str,
+        data: pd.DataFrame,
+        content_hash: str,
+        created_at: datetime,
+        extra_metadata: dict[bytes, bytes] | None = None,
+    ) -> BackupMetadata:
+        """Write a backup file without adding it to the index.
+
+        Args:
+            backup_key: The backup key
+            dataset: Original dataset name
+            data: DataFrame to write
+            content_hash: Content hash stored with the backup
+            created_at: Backup timestamp (also used for the file name)
+            extra_metadata: Additional parquet schema metadata
+
+        Returns:
+            Metadata describing the written file
+        """
+        backup_dir = self._get_backup_dir(backup_key)
+        backup_dir.mkdir(parents=True, exist_ok=True)
+
+        file_path = self._new_backup_file(backup_key, created_at)
+
+        # Convert to PyArrow table with metadata
+        table = pa.Table.from_pandas(data)
+        metadata = {
+            b"sentinel_version": b"0.1.9",
+            b"created_at": created_at.isoformat().encode(),
+            b"content_hash": content_hash.encode(),
+            b"dataset": dataset.encode(),
+            b"backup_key": backup_key.encode(),
+            **(extra_metadata or {}),
+        }
+        table = table.replace_schema_metadata({**table.schema.metadata, **metadata})
+
+        # Write to Parquet; never leave a partial file behind
+        try:
+            pq.write_table(table, file_path, compression=self.compression)
+        except Exception:
+            file_path.unlink(missing_ok=True)
+            raise
+
+        return BackupMetadata(
+            dataset=dataset,
+            backup_key=backup_key,
+            content_hash=content_hash,
+            created_at=created_at,
+            row_count=len(data),
+            column_count=len(data.columns),
+            file_path=file_path,
+            file_size_bytes=file_path.stat().st_size,
+        )
+
     def save(
         self,
         backup_key: str,
@@ -95,38 +174,8 @@ class ParquetStorage(StorageBackend):
         content_hash: str,
     ) -> BackupMetadata:
         """Save DataFrame to Parquet storage."""
-        now = datetime.now()
-        backup_dir = self._get_backup_dir(backup_key)
-        backup_dir.mkdir(parents=True, exist_ok=True)
-
-        file_path = self._get_backup_file(backup_key, now)
-
-        # Convert to PyArrow table with metadata
-        table = pa.Table.from_pandas(data)
-        metadata = {
-            b"sentinel_version": b"0.1.9",
-            b"created_at": now.isoformat().encode(),
-            b"content_hash": content_hash.encode(),
-            b"dataset": dataset.encode(),
-            b"backup_key": backup_key.encode(),
-        }
-        table = table.replace_schema_metadata({**table.schema.metadata, **metadata})
-
-        # Write to Parquet
-        pq.write_table(table, file_path, compression=self.compression)
-
-        file_size = file_path.stat().st_size
-
-        # Create metadata
-        backup_metadata = BackupMetadata(
-            dataset=dataset,
-            backup_key=backup_key,
-            content_hash=content_hash,
-            created_at=now,
-            row_count=len(data),
-            column_count=len(data.columns),
-            file_path=file_path,
-            file_size_bytes=file_size,
+        backup_metadata = self._write_backup(
+            backup_key, dataset, data, content_hash, datetime.now()
         )
 
         # Add to index
@@ -134,7 +183,7 @@ class ParquetStorage(StorageBackend):
 
         logger.info(
             f"Saved backup: {backup_key} ({len(data)} rows, "
-            f"{len(data.columns)} columns, {file_size:,} bytes)"
+            f"{len(data.columns)} columns, {backup_metadata.file_size_bytes:,} bytes)"
         )
 
         return backup_metadata
@@ -268,44 +317,17 @@ class ParquetStorage(StorageBackend):
         reason: str | None = None,
     ) -> BackupMetadata:
         """Accept new data as the baseline."""
-        now = datetime.now()
-        backup_dir = self._get_backup_dir(backup_key)
-        backup_dir.mkdir(parents=True, exist_ok=True)
-
-        file_path = self._get_backup_file(backup_key, now)
-
-        # Convert to PyArrow table with metadata
-        table = pa.Table.from_pandas(data)
-        metadata_dict = {
-            b"sentinel_version": b"0.1.9",
-            b"created_at": now.isoformat().encode(),
-            b"content_hash": content_hash.encode(),
-            b"dataset": dataset.encode(),
-            b"backup_key": backup_key.encode(),
-            b"accepted": b"true",
-        }
+        extra_metadata = {b"accepted": b"true"}
         if reason:
-            metadata_dict[b"accepted_reason"] = reason.encode()
+            extra_metadata[b"accepted_reason"] = reason.encode()
 
-        table = table.replace_schema_metadata(
-            {**table.schema.metadata, **metadata_dict}
-        )
-
-        # Write to Parquet
-        pq.write_table(table, file_path, compression=self.compression)
-
-        file_size = file_path.stat().st_size
-
-        # Create metadata
-        backup_metadata = BackupMetadata(
-            dataset=dataset,
-            backup_key=backup_key,
-            content_hash=content_hash,
-            created_at=now,
-            row_count=len(data),
-            column_count=len(data.columns),
-            file_path=file_path,
-            file_size_bytes=file_size,
+        backup_metadata = self._write_backup(
+            backup_key,
+            dataset,
+            data,
+            content_hash,
+            datetime.now(),
+            extra_metadata,
         )
 
         # Add to index with reason

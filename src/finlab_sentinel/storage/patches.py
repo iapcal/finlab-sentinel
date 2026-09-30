@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -109,7 +110,40 @@ class PatchStore:
         self.compression = compression if compression != "none" else None
 
     def _get_patch_dir(self, patch_id: str) -> Path:
+        # Patch ids are single path components; reject anything that could
+        # resolve outside the patches directory (e.g. "..", "../data").
+        if (
+            not patch_id
+            or patch_id in (".", "..")
+            or any(sep in patch_id for sep in ("/", "\\", ":"))
+        ):
+            raise PatchNotFoundError(f"Invalid patch id: {patch_id!r}")
         return self.patches_path / patch_id
+
+    def _allocate_patch_dir(self, backup_key: str, now: datetime) -> tuple[str, Path]:
+        """Create a new, empty patch directory.
+
+        Two patches of one dataset can be created within the same second
+        (e.g. a baseline replaced twice in quick succession); a numeric
+        suffix keeps the newer patch from overwriting the older one.
+
+        Returns:
+            Tuple of (patch_id, patch directory)
+        """
+        base_id = f"{backup_key}__{now.strftime('%Y-%m-%dT%H-%M-%S')}"
+        self.patches_path.mkdir(parents=True, exist_ok=True)
+
+        patch_id = base_id
+        counter = 1
+        while True:
+            patch_dir = self._get_patch_dir(patch_id)
+            try:
+                # Exclusive create: never reuse an existing patch directory
+                patch_dir.mkdir()
+                return patch_id, patch_dir
+            except FileExistsError:
+                counter += 1
+                patch_id = f"{base_id}_{counter}"
 
     def create(
         self,
@@ -136,9 +170,7 @@ class PatchStore:
             Metadata for the created patch
         """
         now = datetime.now()
-        patch_id = f"{backup_key}__{now.strftime('%Y-%m-%dT%H-%M-%S')}"
-        patch_dir = self._get_patch_dir(patch_id)
-        patch_dir.mkdir(parents=True, exist_ok=True)
+        patch_id, patch_dir = self._allocate_patch_dir(backup_key, now)
 
         metadata = PatchMetadata(
             patch_id=patch_id,
@@ -155,12 +187,16 @@ class PatchStore:
 
         # Write parquet first, json last: patch.json presence marks a
         # complete patch, so readers skip interrupted writes.
-        old_data.to_parquet(patch_dir / OLD_DATA_NAME, compression=self.compression)
-        json_path = patch_dir / PATCH_JSON_NAME
-        json_path.write_text(
-            json.dumps(metadata.to_dict(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        try:
+            old_data.to_parquet(patch_dir / OLD_DATA_NAME, compression=self.compression)
+            json_path = patch_dir / PATCH_JSON_NAME
+            json_path.write_text(
+                json.dumps(metadata.to_dict(), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            shutil.rmtree(patch_dir, ignore_errors=True)
+            raise
 
         logger.info(f"Created permanent patch: {patch_id}")
         return metadata
@@ -248,7 +284,10 @@ class PatchStore:
         Returns:
             True if deleted, False if patch did not exist
         """
-        patch_dir = self._get_patch_dir(patch_id)
+        try:
+            patch_dir = self._get_patch_dir(patch_id)
+        except PatchNotFoundError:
+            return False
         if not patch_dir.exists():
             return False
 
