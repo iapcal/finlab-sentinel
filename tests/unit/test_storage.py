@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import pytest
 
+from finlab_sentinel.storage.backend import BackupMetadata
 from finlab_sentinel.storage.parquet import ParquetStorage, sanitize_backup_key
 
 
@@ -486,6 +487,72 @@ class TestBackupMetadata:
 
 class TestBackupIndex:
     """Tests for BackupIndex class."""
+
+    def test_add_if_latest_inserts_when_unchanged(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
+        """Verify add_if_latest adds when the latest backup is as expected."""
+        latest = parquet_storage.save("cas", "test", sample_df, "hash1")
+        new = BackupMetadata(
+            dataset="test",
+            backup_key="cas",
+            content_hash="hash2",
+            created_at=latest.created_at + timedelta(seconds=1),
+            row_count=1,
+            column_count=1,
+            file_path=latest.file_path.with_name("new.parquet"),
+        )
+
+        assert parquet_storage.index.add_if_latest(new, latest, reason="r") is True
+        assert parquet_storage.get_latest_metadata("cas") == new
+
+    def test_add_if_latest_refuses_when_latest_changed(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
+        """Verify add_if_latest writes nothing if another backup came first."""
+        expected = parquet_storage.save("cas", "test", sample_df, "hash1")
+        concurrent = parquet_storage.save("cas", "test", sample_df, "hash2")
+        new = BackupMetadata(
+            dataset="test",
+            backup_key="cas",
+            content_hash="hash3",
+            created_at=concurrent.created_at + timedelta(seconds=1),
+            row_count=1,
+            column_count=1,
+            file_path=concurrent.file_path.with_name("new.parquet"),
+        )
+
+        assert parquet_storage.index.add_if_latest(new, expected) is False
+        assert parquet_storage.get_latest_metadata("cas") == concurrent
+        assert len(parquet_storage.list_backups("cas")) == 2
+
+    def test_add_if_latest_expects_no_backups(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
+        """Verify expected_latest=None only matches a key without backups."""
+        new = BackupMetadata(
+            dataset="test",
+            backup_key="cas",
+            content_hash="hash1",
+            created_at=datetime.now(),
+            row_count=1,
+            column_count=1,
+            file_path=parquet_storage._get_backup_dir("cas") / "new.parquet",
+        )
+        assert parquet_storage.index.add_if_latest(new, None) is True
+        assert parquet_storage.index.add_if_latest(new, None) is False
+
+    def test_load_backup_missing_file_returns_none(
+        self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame
+    ):
+        """Verify load_backup returns None when the file is gone."""
+        metadata = parquet_storage.save("gone", "test", sample_df, "hash1")
+        pd.testing.assert_frame_equal(
+            parquet_storage.load_backup(metadata), sample_df, check_freq=False
+        )
+
+        metadata.file_path.unlink()
+        assert parquet_storage.load_backup(metadata) is None
 
     def test_get_unique_keys(
         self, parquet_storage: ParquetStorage, sample_df: pd.DataFrame

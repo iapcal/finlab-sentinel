@@ -280,3 +280,32 @@ class TestPatchIdValidation:
 
         assert keep.exists()
         assert patch_store.load_metadata(created.patch_id) is not None
+
+
+class TestPatchMetadataRestoredFrom:
+    """Tests for the restored_from field."""
+
+    def test_roundtrip(self, patch_store, sample_df, comparison_result) -> None:
+        created = patch_store.create(
+            dataset="price:收盤價",
+            backup_key="price__收盤價",
+            old_data=sample_df,
+            comparison_result=comparison_result,
+            old_hash="a",
+            new_hash="b",
+            restored_from="price__收盤價__2026-07-11T10-30-00",
+        )
+
+        loaded = patch_store.load_metadata(created.patch_id)
+        assert loaded.restored_from == "price__收盤價__2026-07-11T10-30-00"
+        assert loaded == created
+
+    def test_patch_json_without_field_loads(
+        self, patch_store, sample_df, comparison_result
+    ) -> None:
+        """patch.json written before restore support still loads."""
+        created = _create_patch(patch_store, sample_df, comparison_result)
+        data = created.to_dict()
+        del data["restored_from"]
+
+        assert PatchMetadata.from_dict(data).restored_from is None

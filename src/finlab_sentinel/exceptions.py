@@ -47,6 +47,13 @@ class PatchNotFoundError(SentinelError):
     """Raised when a requested patch does not exist."""
 
 
+class PatchRestoreError(SentinelError):
+    """Raised when a patch cannot be restored.
+
+    The dataset's baseline is left unchanged when this is raised.
+    """
+
+
 class TimeTravelError(SentinelError):
     """Base exception for time travel related errors."""
 

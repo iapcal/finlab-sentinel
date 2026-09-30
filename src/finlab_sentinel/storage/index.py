@@ -66,6 +66,31 @@ class BackupIndex:
         finally:
             conn.close()
 
+    @staticmethod
+    def _insert(
+        conn: sqlite3.Connection, metadata: BackupMetadata, reason: str | None
+    ) -> None:
+        """Insert a backup row using an open connection."""
+        conn.execute(
+            """
+            INSERT INTO backups
+            (backup_key, dataset, file_path, content_hash, created_at,
+             row_count, column_count, file_size_bytes, accepted_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                metadata.backup_key,
+                metadata.dataset,
+                str(metadata.file_path),
+                metadata.content_hash,
+                metadata.created_at.isoformat(),
+                metadata.row_count,
+                metadata.column_count,
+                metadata.file_size_bytes,
+                reason,
+            ),
+        )
+
     def add(self, metadata: BackupMetadata, reason: str | None = None) -> None:
         """Add backup metadata to index.
 
@@ -74,26 +99,52 @@ class BackupIndex:
             reason: Optional reason (for accepted data)
         """
         with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO backups
-                (backup_key, dataset, file_path, content_hash, created_at,
-                 row_count, column_count, file_size_bytes, accepted_reason)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    metadata.backup_key,
-                    metadata.dataset,
-                    str(metadata.file_path),
-                    metadata.content_hash,
-                    metadata.created_at.isoformat(),
-                    metadata.row_count,
-                    metadata.column_count,
-                    metadata.file_size_bytes,
-                    reason,
-                ),
-            )
+            self._insert(conn, metadata, reason)
         logger.debug(f"Added backup to index: {metadata.backup_key}")
+
+    def add_if_latest(
+        self,
+        metadata: BackupMetadata,
+        expected_latest: BackupMetadata | None,
+        reason: str | None = None,
+    ) -> bool:
+        """Add backup metadata only if the key's latest backup is unchanged.
+
+        The check and the insert run in a single write transaction, so a
+        backup saved concurrently by another process is never silently
+        superseded.
+
+        Args:
+            metadata: Backup metadata to add
+            expected_latest: The latest backup the caller based its change on
+                (None if the key had no backups)
+            reason: Optional reason stored with the entry
+
+        Returns:
+            True if added, False if the latest backup differs from
+            ``expected_latest`` (nothing is written)
+        """
+        with self._connect() as conn:
+            # Take the write lock before reading so check and insert are atomic
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT * FROM backups
+                WHERE backup_key = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (metadata.backup_key,),
+            ).fetchone()
+            current = self._row_to_metadata(row) if row is not None else None
+            if current != expected_latest:
+                logger.debug(
+                    f"Latest backup changed for {metadata.backup_key}, not adding"
+                )
+                return False
+            self._insert(conn, metadata, reason)
+        logger.debug(f"Added backup to index: {metadata.backup_key}")
+        return True
 
     def get_latest(self, backup_key: str) -> BackupMetadata | None:
         """Get most recent backup metadata for a key.

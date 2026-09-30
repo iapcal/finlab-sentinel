@@ -1043,3 +1043,182 @@ class TestPatchDeleteCommand:
         assert "not found" in result.stdout.lower()
         assert keep.exists()
         assert len(store.list_patches()) == 1
+
+
+@pytest.fixture
+def accepted_with_patch(mock_config: SentinelConfig, sample_df: pd.DataFrame):
+    """Storage whose baseline was accepted over sample_df, plus the patch.
+
+    Returns (storage, patch_store, patch_metadata).
+    """
+    from finlab_sentinel.comparison.differ import DataFrameComparer
+    from finlab_sentinel.storage.patches import PatchStore
+
+    accepted = sample_df.copy()
+    accepted.iloc[0, 0] = 999.99
+
+    storage = ParquetStorage(
+        base_path=mock_config.get_storage_path(),
+        compression=mock_config.storage.compression,
+    )
+    storage.save("price__收盤價", "price:收盤價", sample_df, "oldhash")
+    store = PatchStore(base_path=mock_config.get_storage_path())
+    metadata = store.create(
+        dataset="price:收盤價",
+        backup_key="price__收盤價",
+        old_data=sample_df,
+        comparison_result=DataFrameComparer().compare(sample_df, accepted),
+        old_hash="oldhash",
+        new_hash="newhash",
+        reason="data revision",
+    )
+    storage.accept_new_data(
+        "price__收盤價", accepted, "newhash", "price:收盤價", reason="data revision"
+    )
+    return storage, store, metadata
+
+
+class TestPatchRestoreCommand:
+    """Tests for patch restore command."""
+
+    @staticmethod
+    def _invoke(mock_config: SentinelConfig, args: list[str], input: str | None = None):
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
+            return runner.invoke(app, ["patch", "restore", *args], input=input)
+
+    def test_restore_unknown_patch(self, mock_config: SentinelConfig):
+        """Verify restore fails for an unknown patch."""
+        result = self._invoke(mock_config, ["nonexistent", "--yes"])
+
+        assert result.exit_code == 1
+        assert "Patch not found" in result.stdout
+
+    def test_restore_dry_run(self, mock_config: SentinelConfig, accepted_with_patch):
+        """Verify dry run shows both baselines and changes nothing."""
+        storage, store, metadata = accepted_with_patch
+
+        result = self._invoke(mock_config, [metadata.patch_id, "--dry-run"])
+
+        assert result.exit_code == 0
+        assert "Dry run" in result.stdout
+        assert "newhash" in result.stdout  # current baseline
+        assert "oldhash" in result.stdout  # patch data to restore
+        assert storage.get_latest_metadata("price__收盤價").content_hash == "newhash"
+        assert len(store.list_patches()) == 1
+
+    def test_restore_with_yes(self, mock_config: SentinelConfig, accepted_with_patch):
+        """Verify restore replaces the baseline and preserves the old one."""
+        storage, store, metadata = accepted_with_patch
+
+        result = self._invoke(mock_config, [metadata.patch_id, "--yes"])
+
+        assert result.exit_code == 0
+        assert "Restored baseline for: price:收盤價" in result.stdout
+        assert "Replaced Hash: newhash" in result.stdout
+        assert "Previous baseline saved as patch" in result.stdout
+        assert storage.get_latest_metadata("price__收盤價").content_hash == "oldhash"
+        new_patches = [p for p in store.list_patches() if p.restored_from]
+        assert len(new_patches) == 1
+        assert new_patches[0].restored_from == metadata.patch_id
+        assert new_patches[0].old_hash == "newhash"
+        assert new_patches[0].reason == f"restore of {metadata.patch_id}"
+
+    def test_restore_prompts_and_aborts(
+        self, mock_config: SentinelConfig, accepted_with_patch
+    ):
+        """Verify restore asks for confirmation and aborts on 'n'."""
+        storage, store, metadata = accepted_with_patch
+
+        result = self._invoke(mock_config, [metadata.patch_id], input="n\n")
+
+        assert result.exit_code == 0
+        assert "Aborted" in result.stdout
+        assert storage.get_latest_metadata("price__收盤價").content_hash == "newhash"
+        assert len(store.list_patches()) == 1
+
+    def test_restore_prompts_and_confirms(
+        self, mock_config: SentinelConfig, accepted_with_patch
+    ):
+        """Verify restore proceeds when confirmed."""
+        storage, _, metadata = accepted_with_patch
+
+        result = self._invoke(mock_config, [metadata.patch_id], input="y\n")
+
+        assert result.exit_code == 0
+        assert storage.get_latest_metadata("price__收盤價").content_hash == "oldhash"
+
+    def test_restore_with_reason(
+        self, mock_config: SentinelConfig, accepted_with_patch
+    ):
+        """Verify --reason is recorded on the patch of the replaced baseline."""
+        _, store, metadata = accepted_with_patch
+
+        result = self._invoke(
+            mock_config, [metadata.patch_id, "-y", "--reason", "manual rollback"]
+        )
+
+        assert result.exit_code == 0
+        new_patch = next(p for p in store.list_patches() if p.restored_from)
+        assert new_patch.reason == "manual rollback"
+
+    def test_restore_twice_is_noop(
+        self, mock_config: SentinelConfig, accepted_with_patch
+    ):
+        """Verify restoring an already restored patch changes nothing."""
+        storage, store, metadata = accepted_with_patch
+        self._invoke(mock_config, [metadata.patch_id, "--yes"])
+        backups = storage.list_backups("price__收盤價")
+
+        result = self._invoke(mock_config, [metadata.patch_id, "--yes"])
+
+        assert result.exit_code == 0
+        assert "already matches" in result.stdout
+        assert storage.list_backups("price__收盤價") == backups
+        assert len(store.list_patches()) == 2
+
+    def test_restore_without_baseline(
+        self, mock_config: SentinelConfig, patch_store_with_patch
+    ):
+        """Verify a dataset without a baseline simply gets the patch data."""
+        _, metadata = patch_store_with_patch
+
+        result = self._invoke(mock_config, [metadata.patch_id, "--yes"])
+
+        assert result.exit_code == 0
+        assert "No previous baseline" in result.stdout
+        storage = ParquetStorage(base_path=mock_config.get_storage_path())
+        assert storage.get_latest_metadata("price__收盤價").content_hash == "oldhash"
+
+    def test_restore_failure_exits_nonzero(
+        self, mock_config: SentinelConfig, accepted_with_patch
+    ):
+        """Verify a failed restore exits 1 and leaves the baseline unchanged."""
+        storage, _, metadata = accepted_with_patch
+
+        with patch(
+            "finlab_sentinel.storage.patches.PatchStore.create",
+            side_effect=OSError("disk full"),
+        ):
+            result = self._invoke(mock_config, [metadata.patch_id, "--yes"])
+
+        assert result.exit_code == 1
+        assert "Failed to restore patch" in result.stdout
+        assert storage.get_latest_metadata("price__收盤價").content_hash == "newhash"
+
+    def test_show_displays_restored_from(
+        self, mock_config: SentinelConfig, accepted_with_patch
+    ):
+        """Verify patch show reports which patch a restore came from."""
+        _, store, metadata = accepted_with_patch
+        self._invoke(mock_config, [metadata.patch_id, "--yes"])
+        new_patch = next(p for p in store.list_patches() if p.restored_from)
+
+        with patch(
+            "finlab_sentinel.config.loader.load_config", return_value=mock_config
+        ):
+            result = runner.invoke(app, ["patch", "show", new_patch.patch_id])
+
+        assert result.exit_code == 0
+        assert "Restored From" in result.stdout

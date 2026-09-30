@@ -30,7 +30,7 @@
 - **通知機制**: 支援自訂 callback（如 LINE、email 通知）
 - **CLI 工具**: 管理備份、查看差異、接受新資料
 - **時間旅行**: 回到歷史時間點取得當時的備份資料
-- **永久 Patch**: accept 新資料時自動保存舊 baseline 快照，不受備份清理影響，隨時可查閱與匯出
+- **永久 Patch**: accept 新資料時自動保存舊 baseline 快照，不受備份清理影響，隨時可查閱、匯出或還原（撤銷 accept）
 
 ## 安裝
 
@@ -109,6 +109,7 @@ sentinel patch list
 sentinel patch show <patch_id>
 sentinel patch export <patch_id> -o ./old_data.parquet
 sentinel patch delete <patch_id>
+sentinel patch restore <patch_id>   # 撤銷 accept：還原 patch 保存的舊 baseline
 ```
 
 ## 處理資料異常
@@ -256,7 +257,9 @@ finally:
 
 ## 永久 Patch
 
-當你 accept 新資料作為 baseline 時，sentinel 會自動建立一個**永久 patch**，保存 accept 前的舊 baseline 完整快照與 diff 摘要。Patch 存放在 `<storage.path>/patches/`，**不受滾動備份的 retention 清理影響**，之後可以隨時查閱、匯出舊資料。
+當你 accept 新資料作為 baseline 時，sentinel 會自動建立一個**永久 patch**，保存 accept 前的舊 baseline 完整快照與 diff 摘要。Patch 存放在 `<storage.path>/patches/`，**不受滾動備份的 retention 清理影響**，之後可以隨時查閱、匯出舊資料，或還原成 baseline（見下方「還原 patch」）。
+
+Patch ID 的格式為 `<backup_key>__<時間>`；同一秒內建立多個 patch 時，後建立者會加上 `_2`、`_3` 等後綴。
 
 ### CLI 用法
 
@@ -272,6 +275,9 @@ sentinel patch export "price__收盤價__2026-07-11T10-30-00" -o ./old_data.parq
 
 # 刪除 patch（需確認，或加 --force）
 sentinel patch delete "price__收盤價__2026-07-11T10-30-00"
+
+# 還原 patch，撤銷當初的 accept（需確認，或加 --yes）
+sentinel patch restore "price__收盤價__2026-07-11T10-30-00"
 ```
 
 ### Python API
@@ -287,6 +293,37 @@ for p in patches:
 # 取回 accept 前的舊 baseline DataFrame
 old_close = fs.load_patch_data(patches[0].patch_id)
 ```
+
+### 還原 patch（撤銷 accept）
+
+`sentinel patch restore` 以 patch 保存的舊 baseline 取代該資料源目前的 baseline，回到 accept 之前的狀態：資料與 content hash 都與 accept 前完全相同，因此下次 `data.get` 的比對行為也與 accept 前一致（例如當初觸發異常的新資料會再次觸發異常）。
+
+```bash
+# 先預覽：列出目前 baseline 與 patch 資料的 hash、時間、大小，不寫入任何東西
+sentinel patch restore "price__收盤價__2026-07-11T10-30-00" --dry-run
+
+# 還原（需確認，或加 --yes / -y 略過；--reason 記錄原因）
+sentinel patch restore "price__收盤價__2026-07-11T10-30-00" --reason "撤銷誤判的 accept"
+```
+
+```python
+import finlab_sentinel as fs
+
+result = fs.restore_patch("price__收盤價__2026-07-11T10-30-00", reason="撤銷誤判的 accept")
+result.changed       # baseline 是否被取代
+result.new_patch_id  # 被取代的 baseline 另存成的新 patch；還原它即可撤銷這次還原
+result.to_dict()     # 可序列化成 JSON 的結果摘要
+
+# 只預覽（不寫入）：result.previous 是目前的 baseline，result.patch 是要還原的 patch
+preview = fs.restore_patch("price__收盤價__2026-07-11T10-30-00", dry_run=True)
+```
+
+- **還原本身也可以再還原**：被取代的 baseline 會先另存成一個新 patch（reason 預設為 `restore of <patch_id>`，`patch show` 會顯示 `Restored From`），之後 restore 這個新 patch 就能回到還原前。
+- **來源 patch 會保留**：還原不會消耗或刪除 patch，同一個 patch 可以重複使用；若 baseline 已與 patch 相同（hash 與資料皆一致）則不寫入任何東西，重複執行是安全的。
+- **content hash 原樣還原、不重新計算**：baseline 的 hash 是 `data.get` 攔截時對 preprocess hook 處理後的資料計算的，還原時直接沿用 patch 記錄的值，所以在沒有註冊 hook 的 CLI 中還原也正確。
+- **Retention**：還原後的 baseline 是還原當下建立的一般備份，retention 清理對待它的方式與剛存入的 baseline 相同；accept 與還原之前的備份仍留在歷史中（時間旅行查得到），照一般規則過期。
+- **不會讓資料源失去 baseline**：新檔案完整寫入並 flush 到磁碟後才更新索引；若過程中 baseline 被其他程序更新、或任何一步失敗，還原會中止並拋出 `PatchRestoreError`（CLI 回傳 1），原本的 baseline 保持不變，也不留下半成品。
+- 資料源目前沒有 baseline 時，patch 資料直接成為 baseline（沒有東西需要另存）；patch 不存在時拋出 `PatchNotFoundError`（CLI 回傳 1），不做任何變更。
 
 ### 關閉自動建立
 

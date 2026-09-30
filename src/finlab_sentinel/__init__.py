@@ -14,6 +14,7 @@ from finlab_sentinel.exceptions import (
     DataAnomalyError,
     NoHistoricalDataError,
     PatchNotFoundError,
+    PatchRestoreError,
     SentinelError,
     TimeTravelError,
 )
@@ -21,7 +22,12 @@ from finlab_sentinel.exceptions import (
 if TYPE_CHECKING:
     import pandas as pd
 
-    from finlab_sentinel.storage.patches import PatchMetadata, PatchStore
+    from finlab_sentinel.config.schema import SentinelConfig
+    from finlab_sentinel.storage.patches import (
+        PatchMetadata,
+        PatchStore,
+        RestoreResult,
+    )
 
 __version__ = "0.1.9"
 
@@ -35,6 +41,7 @@ __all__ = [
     "TimeTravelError",
     "NoHistoricalDataError",
     "PatchNotFoundError",
+    "PatchRestoreError",
     "register_preprocess_hook",
     "unregister_preprocess_hook",
     "clear_preprocess_hooks",
@@ -43,6 +50,7 @@ __all__ = [
     "get_time_travel_status",
     "list_patches",
     "load_patch_data",
+    "restore_patch",
 ]
 
 
@@ -136,3 +144,39 @@ def load_patch_data(patch_id: str) -> "pd.DataFrame":
         >>> old_close = fs.load_patch_data(fs.list_patches()[0].patch_id)
     """
     return _get_patch_store().load_old_data(patch_id)
+
+
+def restore_patch(
+    patch_id: str,
+    config: "SentinelConfig | None" = None,
+    reason: str | None = None,
+    dry_run: bool = False,
+) -> "RestoreResult":
+    """Restore the baseline preserved by a patch, undoing its accept.
+
+    The patch's data and content hash become the dataset's baseline again,
+    exactly as before the accept that created the patch. The replaced
+    baseline is saved as a new patch (see ``RestoreResult.new_patch_id``), so
+    the restore can itself be restored; the source patch is kept.
+
+    Args:
+        patch_id: The patch identifier (see list_patches)
+        config: Optional configuration (uses default if not provided)
+        reason: Reason recorded on the new patch (default: "restore of <id>")
+        dry_run: Only report what would change, without writing anything
+
+    Returns:
+        RestoreResult describing the previous and restored baselines
+
+    Raises:
+        PatchNotFoundError: If the patch does not exist
+        PatchRestoreError: If the restore fails; the baseline is unchanged
+
+    Example:
+        >>> import finlab_sentinel as fs
+        >>> result = fs.restore_patch("price__收盤價__2026-07-11T10-30-00")
+        >>> result.new_patch_id  # restore this to undo the restore
+    """
+    from finlab_sentinel.storage.patches import restore_patch as _restore_patch
+
+    return _restore_patch(patch_id, config=config, reason=reason, dry_run=dry_run)

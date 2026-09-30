@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -12,10 +14,37 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from finlab_sentinel.exceptions import StorageError
 from finlab_sentinel.storage.backend import BackupMetadata, StorageBackend
 from finlab_sentinel.storage.index import BackupIndex
 
 logger = logging.getLogger(__name__)
+
+
+def get_index_path(base_path: Path) -> Path:
+    """Get the backup index database path for a storage base directory.
+
+    Args:
+        base_path: Sentinel storage base directory
+
+    Returns:
+        Path of the SQLite index (may not exist yet)
+    """
+    return base_path.expanduser() / "data" / "index.sqlite"
+
+
+def _fsync_file(path: Path) -> None:
+    """Flush a written file (and, where supported, its directory) to disk."""
+    # Opened for update: Windows can only flush handles with write access
+    with open(path, "rb+") as f:
+        os.fsync(f.fileno())
+    # Directory fsync makes the new entry durable; unsupported on Windows.
+    with contextlib.suppress(OSError):
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
 
 def sanitize_backup_key(dataset: str, universe_hash: str | None = None) -> str:
@@ -73,7 +102,7 @@ class ParquetStorage(StorageBackend):
         self.data_path.mkdir(parents=True, exist_ok=True)
 
         # Initialize index
-        self.index = BackupIndex(self.base_path / "data" / "index.sqlite")
+        self.index = BackupIndex(get_index_path(self.base_path))
 
         logger.debug(f"Initialized ParquetStorage at {self.base_path}")
 
@@ -235,6 +264,18 @@ class ParquetStorage(StorageBackend):
 
         return df, metadata
 
+    def load_backup(self, metadata: BackupMetadata) -> pd.DataFrame | None:
+        """Load the data of a specific backup.
+
+        Args:
+            metadata: Metadata of the backup (e.g. from get_latest_metadata)
+
+        Returns:
+            The DataFrame, or None if the backup file is missing
+        """
+        result = self._load_from_metadata(metadata)
+        return result[0] if result is not None else None
+
     def get_latest_metadata(self, backup_key: str) -> BackupMetadata | None:
         """Get metadata for most recent backup without loading data."""
         return self.index.get_latest(backup_key)
@@ -256,8 +297,6 @@ class ParquetStorage(StorageBackend):
         Returns:
             Number of backups deleted
         """
-        from datetime import timedelta
-
         cutoff = datetime.now() - timedelta(days=retention_days)
         deleted_metadata = self.index.delete_expired(cutoff, min_keep_per_key)
 
@@ -335,6 +374,78 @@ class ParquetStorage(StorageBackend):
 
         logger.info(
             f"Accepted new data as baseline: {backup_key}"
+            + (f" (reason: {reason})" if reason else "")
+        )
+
+        return backup_metadata
+
+    def restore_baseline(
+        self,
+        backup_key: str,
+        dataset: str,
+        data: pd.DataFrame,
+        content_hash: str,
+        patch_id: str,
+        expected_latest: BackupMetadata | None,
+        reason: str | None = None,
+    ) -> BackupMetadata:
+        """Make data restored from a permanent patch the latest baseline.
+
+        ``content_hash`` is stored verbatim, never recomputed: it is the hash
+        the baseline had when the patch was created, which DataInterceptor
+        computes over preprocessed data.
+
+        The new file is fully written and flushed to disk before the index
+        entry that makes it the baseline is added, and the entry is only added
+        if the latest backup is still ``expected_latest``. On any failure the
+        new file is removed and the previous baseline stays in place.
+
+        Args:
+            backup_key: The backup key
+            dataset: Original dataset name
+            data: Baseline DataFrame preserved by the patch
+            content_hash: Content hash recorded in the patch
+            patch_id: The patch being restored (recorded in file metadata)
+            expected_latest: Latest backup the restore was planned against
+                (None if the key had no backups)
+            reason: Optional reason stored with the index entry
+
+        Returns:
+            Metadata for the new baseline
+
+        Raises:
+            StorageError: If the latest backup changed since
+                ``expected_latest`` was read
+        """
+        created_at = datetime.now()
+        if expected_latest is not None and expected_latest.created_at >= created_at:
+            # Clock went backwards or the latest backup is future-dated; the
+            # restored baseline must still sort after it to become the latest.
+            created_at = expected_latest.created_at + timedelta(microseconds=1)
+
+        extra_metadata = {b"restored_from_patch": patch_id.encode()}
+        if reason:
+            extra_metadata[b"restored_reason"] = reason.encode()
+
+        backup_metadata = self._write_backup(
+            backup_key, dataset, data, content_hash, created_at, extra_metadata
+        )
+
+        try:
+            _fsync_file(backup_metadata.file_path)
+            added = self.index.add_if_latest(
+                backup_metadata, expected_latest, reason=reason
+            )
+        except Exception:
+            backup_metadata.file_path.unlink(missing_ok=True)
+            raise
+
+        if not added:
+            backup_metadata.file_path.unlink(missing_ok=True)
+            raise StorageError(f"Latest backup of {backup_key} changed during restore")
+
+        logger.info(
+            f"Restored baseline from patch {patch_id}: {backup_key}"
             + (f" (reason: {reason})" if reason else "")
         )
 

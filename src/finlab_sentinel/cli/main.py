@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 from rich.console import Console
 from rich.table import Table
+
+if TYPE_CHECKING:
+    from finlab_sentinel.storage.patches import RestoreResult
 
 app = typer.Typer(
     name="sentinel",
@@ -353,6 +357,8 @@ def patch_show(
     console.print(f"  Dataset: {p.dataset}")
     console.print(f"  Created At: {p.created_at.isoformat()}")
     console.print(f"  Reason: {p.reason or '-'}")
+    if p.restored_from:
+        console.print(f"  Restored From: {p.restored_from}")
     console.print(f"  Old Hash: {p.old_hash}")
     console.print(f"  New Hash: {p.new_hash}")
     console.print(f"  Old Shape: {p.old_shape[0]} rows x {p.old_shape[1]} columns")
@@ -413,6 +419,124 @@ def patch_delete(
     else:
         console.print(f"[red]Patch not found: {patch_id}[/red]")
         raise typer.Exit(1)
+
+
+@patch_app.command("restore")
+def patch_restore(
+    patch_id: str = typer.Argument(..., help="Patch ID to restore"),
+    reason: str | None = typer.Option(
+        None,
+        "--reason",
+        "-r",
+        help="Reason recorded on the patch that preserves the replaced baseline",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Show what would change without writing anything",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Restore without confirmation",
+    ),
+) -> None:
+    """Restore a patch's preserved data as the dataset's baseline.
+
+    The replaced baseline is saved as a new patch, so the restore can itself
+    be restored. The source patch is kept.
+    """
+    from finlab_sentinel.config.loader import load_config
+    from finlab_sentinel.exceptions import PatchNotFoundError, PatchRestoreError
+    from finlab_sentinel.storage.patches import restore_patch
+
+    config = load_config(_config_path)
+
+    try:
+        preview = restore_patch(patch_id, config, reason=reason, dry_run=True)
+    except PatchNotFoundError:
+        console.print(f"[red]Patch not found: {patch_id}[/red]")
+        raise typer.Exit(1) from None
+    except PatchRestoreError as e:
+        console.print(f"[red]Cannot restore patch: {e}[/red]")
+        raise typer.Exit(1) from None
+
+    _print_restore_preview(preview)
+
+    if preview.already_current:
+        console.print(
+            "[green]Baseline already matches the patch; nothing to do[/green]"
+        )
+        return
+
+    if dry_run:
+        console.print("[yellow]Dry run - nothing changed[/yellow]")
+        return
+
+    if not yes:
+        confirmed = typer.confirm(
+            f"Restore baseline of {preview.patch.dataset} from patch {patch_id}?"
+        )
+        if not confirmed:
+            console.print("[yellow]Aborted[/yellow]")
+            return
+
+    try:
+        result = restore_patch(patch_id, config, reason=reason)
+    except (PatchNotFoundError, PatchRestoreError) as e:
+        console.print(f"[red]Failed to restore patch: {e}[/red]")
+        raise typer.Exit(1) from None
+
+    if not result.changed:
+        console.print(
+            "[green]Baseline already matches the patch; nothing to do[/green]"
+        )
+        return
+
+    console.print(f"[green]Restored baseline for: {result.patch.dataset}[/green]")
+    console.print(f"  Content Hash: {result.patch.old_hash}")
+    if result.previous is not None and result.new_patch_id:
+        console.print(f"  Replaced Hash: {result.previous.content_hash}")
+        console.print(f"  Previous baseline saved as patch: {result.new_patch_id}")
+    else:
+        console.print("  No previous baseline to preserve")
+
+
+def _print_restore_preview(preview: RestoreResult) -> None:
+    """Print the current baseline next to the patch data to be restored."""
+    p = preview.patch
+    prev = preview.previous
+
+    console.print(f"[bold]Restore patch:[/bold] {p.patch_id}")
+    console.print(f"  Dataset: {p.dataset}")
+    console.print(f"  Patch Reason: {p.reason or '-'}")
+
+    table = Table()
+    table.add_column("", style="bold")
+    table.add_column("Current Baseline", style="yellow")
+    table.add_column("Patch Data", style="green")
+    table.add_row(
+        "Content Hash",
+        prev.content_hash if prev else "-",
+        p.old_hash,
+    )
+    table.add_row(
+        "Created At",
+        prev.created_at.strftime("%Y-%m-%d %H:%M:%S") if prev else "-",
+        p.created_at.strftime("%Y-%m-%d %H:%M:%S") + " (patch)",
+    )
+    table.add_row(
+        "Shape",
+        f"{prev.row_count} x {prev.column_count}" if prev else "-",
+        f"{p.old_shape[0]} x {p.old_shape[1]}",
+    )
+    console.print(table)
+
+    if prev is None:
+        console.print("  Dataset has no baseline; the patch data will become it")
+    elif not preview.already_current:
+        console.print("  Current baseline will be saved as a new patch first")
 
 
 @app.command("diff")
