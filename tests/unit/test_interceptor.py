@@ -903,11 +903,14 @@ class TestBaselineWriteRaces:
         )
         other = ParquetStorage(base_path=config_for_interceptor.get_storage_path())
         real_get_latest = interceptor.storage.get_latest_metadata
+        raced = []
 
         def get_latest_then_race(backup_key):
             latest = real_get_latest(backup_key)
-            # Another process saves a baseline right after this one looked
-            other.save(backup_key, "test:dataset", theirs, "their-hash")
+            if not raced:
+                raced.append(True)
+                # Another process saves a baseline right after this one looked
+                other.save(backup_key, "test:dataset", theirs, "their-hash")
             return latest
 
         interceptor.storage.get_latest_metadata = get_latest_then_race
@@ -918,6 +921,45 @@ class TestBaselineWriteRaces:
         backups = other.list_backups("test__dataset")
         assert [b.content_hash for b in backups] == ["their-hash"]
         assert "changed while data.get compared" in caplog.text
+
+    def test_concurrent_save_of_identical_data_does_not_warn(
+        self, config_for_interceptor: SentinelConfig, caplog
+    ):
+        """Two first saves of the same data collide harmlessly: no warning."""
+        import logging
+
+        from finlab_sentinel.comparison.hasher import ContentHasher
+        from finlab_sentinel.storage.parquet import ParquetStorage
+
+        same = pd.DataFrame({"a": [1, 2, 3]})
+        interceptor = DataInterceptor(
+            MagicMock(return_value=same), config_for_interceptor
+        )
+        other = ParquetStorage(base_path=config_for_interceptor.get_storage_path())
+        real_get_latest = interceptor.storage.get_latest_metadata
+        raced = []
+
+        def get_latest_then_race(backup_key):
+            latest = real_get_latest(backup_key)
+            if not raced:
+                raced.append(True)
+                # Another process saves the very same data first
+                other.save(
+                    backup_key,
+                    "test:dataset",
+                    same,
+                    ContentHasher().hash_dataframe(same),
+                )
+            return latest
+
+        interceptor.storage.get_latest_metadata = get_latest_then_race
+        with caplog.at_level(logging.DEBUG, logger="finlab_sentinel"):
+            interceptor("test:dataset")
+
+        assert raced
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert "saved concurrently with the same content" in caplog.text
+        assert len(other.list_backups("test__dataset")) == 1
 
     def test_missing_baseline_file_is_replaced(
         self, config_for_interceptor: SentinelConfig, mock_data_get

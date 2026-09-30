@@ -220,6 +220,17 @@ class DataInterceptor:
                 backup_key, dataset, data, content_hash, expected_latest=compared_to
             )
         except BaselineChangedError:
+            try:
+                latest = self.storage.get_latest_metadata(backup_key)
+            except Exception:
+                latest = None
+            if latest is not None and latest.content_hash == content_hash:
+                # e.g. two first data.get calls of the same data: nothing lost
+                logger.debug(
+                    f"Baseline of {dataset} was saved concurrently with the same "
+                    f"content; not saving again"
+                )
+                return
             logger.warning(
                 f"Baseline of {dataset} changed while data.get compared against "
                 f"it (e.g. by an accept or patch restore); not replacing it"
