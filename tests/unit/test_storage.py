@@ -1,5 +1,6 @@
 """Tests for storage backend."""
 
+import sys
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -930,6 +931,27 @@ class TestSharedBackupFiles:
         loaded, metadata = original.load_latest("ds")
         assert metadata.content_hash == "hash2"
         pd.testing.assert_frame_equal(loaded, sample_df_modified, check_freq=False)
+
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="creating symlinks needs privileges"
+    )
+    def test_unresolvable_file_is_kept_without_error(
+        self, parquet_storage: ParquetStorage, sample_df
+    ):
+        """A symlink loop must not make retention cleanup (run by enable) fail."""
+        older = parquet_storage.save("loop", "test", sample_df, "hash_old")
+        latest = parquet_storage.save("loop", "test", sample_df, "hash_new")
+        older.file_path.unlink()
+        older.file_path.symlink_to(older.file_path)  # resolves to itself
+        self._set_created_at(
+            parquet_storage, "hash_old", datetime.now() - timedelta(days=30)
+        )
+
+        deleted = parquet_storage.cleanup_expired(retention_days=7, min_keep_per_key=1)
+
+        assert deleted == 0
+        assert older.file_path.is_symlink()
+        assert parquet_storage.list_backups("loop") == [latest]
 
 
 class TestBackupWrites:

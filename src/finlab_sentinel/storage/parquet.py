@@ -453,8 +453,10 @@ class ParquetStorage(StorageBackend):
             inside = metadata.file_path.resolve().is_relative_to(
                 self.data_path.resolve()
             )
-        except (OSError, ValueError):
-            inside = False
+        except (OSError, RuntimeError, ValueError) as e:
+            # e.g. a symlink loop: RuntimeError before Python 3.13, OSError since
+            logger.warning(f"Keeping {metadata.file_path}: cannot resolve it ({e})")
+            return True
         if not inside:
             logger.warning(
                 f"Keeping {metadata.file_path}: outside this storage ({self.data_path})"
